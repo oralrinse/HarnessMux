@@ -1,7 +1,22 @@
-# agent-bridge — 项目方案（供评审）
+# agent-bridge — 项目方案（工程记录）
 
-> 状态：核心库、CLI、DSH 侧插件、Codex 侧插件清单已实现并通过自动化测试；MCP 服务器、peer 适配器为设计待实现（每节都标注状态）。
-> 目的：让本机上的两个编码 agent（OpenAI Codex 与 DeepSeek Harness / DSH）**双向、可追问**地协作；并让**其他应用也能调用 DSH**。
+> ⚠️ **定位已更新（2026-10-06，本轮）。** 本文档的**定位表述**已被取代，**工程结论与技术事实不变**。
+>
+> | | |
+> |---|---|
+> | **旧定位（本文档原文）** | Codex ⇄ DeepSeek Harness 的双向桥；"其他应用也能调用 DSH"是附注 |
+> | **新定位** | **用你已经在用的 AI 客户端控制 DeepSeek Harness** —— 面向多客户端（Codex / Claude Code / Cursor / VS Code·Copilot / 通用 MCP）的**插件优先互操作层**，DeepSeek Harness 是当前的 **Native Receiver** |
+> | **改变原因** | P0.5 真机验证证明了"消息可送进**已存在的活动 DSH 会话**"这一性质，而它与具体客户端无关；继续以某个客户端命名会让第二个客户端看起来像一次分叉，也会掩盖真正差异化的能力（活动会话 + 持久投递 + 会话级路由 + 崩溃恢复） |
+>
+> **权威文档（本节之后的表述以它们为准）**：
+> - [`docs/positioning.md`](docs/positioning.md) —— 项目是什么、承诺什么、**刻意不承诺**什么
+> - [`docs/roadmap.md`](docs/roadmap.md) —— 阶段（P3 更名与拆分）、规划目录结构、未决决策
+> - [`docs/receiver-api.md`](docs/receiver-api.md) —— Receiver 接口与 capability model（**规范，尚未落地**）
+> - [`docs/REPORT-p0.5-cutover.md`](docs/REPORT-p0.5-cutover.md) —— 真机证据与已修缺陷
+>
+> **本轮明确未改动**：协议 v2 语义（`ack`/delivery/lease/binding/at-least-once）、迁移规则、DSH receiver 的运行时实现、任何现有回归测试。
+>
+> 状态：核心库、CLI、DSH receiver、Codex 客户端插件清单已实现并通过自动化测试；MCP 工具层、peer 适配器、其他客户端 adapter 为设计待实现（每节都标注状态）。
 > 文档中所有"已核实"的结论都附本机实测证据（命令 + 结果），"推断"一律标注。
 
 ---
@@ -538,6 +553,12 @@ export async function probe(peer) { /* 可用性探测，用于 status */ }
 
 ## 11. 分阶段实施（按评审重排）
 
+> ⚠️ **本节已被 [`docs/roadmap.md`](docs/roadmap.md) 取代**（2026-10-06 定位调整）。
+> 主要变化：`P3 Codex plugin` → **`P3 Portable Client Plugin`**（拆为 P3.1 共享核心 / P3.2 Codex adapter / P3.3 Claude Code adapter / P3.4 其他客户端 / P3.5 兼容性矩阵+CI）；
+> 原 `P4 MCP` 并入 P3.1 的共享工具层；原 `P5 peers` 与 Receiver 抽象合并为 P6（并明确"等第二个 receiver 实现后再验证抽象"）；
+> 新增 **P4 Install/Update/UX**；`Managed MCP→ACP` 降级为 **P5 的可选模式**（不再是主干）。
+> 下表保留为工程记录。
+
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 协议核心 + CLI + 测试 | ✅ 完成 |
@@ -551,6 +572,11 @@ export async function probe(peer) { /* 可用性探测，用于 status */ }
 | P5 | MCP 独立暴露给其他客户端 + peers 适配器（http/webhook） | ⏳ 设计 |
 | P6 | 文档：README（中英）、dsh-setup、codex-setup、examples/demo | ⏳ 部分（protocol.md 完成） |
 | P7 | 发布：npm bundle（DSH 侧）、版本、CHANGELOG、CI 跑 `npm test` | ⏳ 设计 |
+
+> **本节历史映射（供追溯）**：旧 P3 Codex plugin → 新 **P3.1–P3.5 Portable Client Plugin**；
+> 旧 P4 ACP controller → 新 **P5（可选模式，不再是主干）**；旧 P5 MCP+peers → 新 **P3.1 共享工具层** + **P6 Generic Receiver API**；
+> 旧 P6 文档 → 新 **P4 Install/Update/UX + P7 发布**。以 [`docs/roadmap.md`](docs/roadmap.md) 为准。
+> 另注：旧 P1 中的"auto-wake"措辞不准确——当前能力是"投递进 **running** 会话"，idle 不唤醒（见 V1 与 L1）。
 
 **待验证项（不要当结论用）**
 - **V1**：`steer()` / `followup()` / `inject()` 在 idle agent 上的真实语义（评审称 idle steer 会唤醒起 turn）。需用真实 idle root agent 复现后再改 §6.1。

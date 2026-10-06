@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "DSH host plugin for the agent-bridge mailbox: a model-facing mailbox tool, a session briefing, and auto-wake on unread peer messages",
+  "description": "DeepSeek Harness Native Receiver: a model-facing mailbox tool, a session briefing, and a delivery pump that claims, steers and acks protocol-v2 deliveries into live sessions",
   "exports": {
     ".": "./index.js"
   },

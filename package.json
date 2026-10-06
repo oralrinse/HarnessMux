@@ -1,17 +1,22 @@
 {
   "name": "agent-bridge",
   "version": "0.1.0",
-  "description": "A file-based mailbox that lets two coding agents (OpenAI Codex and DeepSeek Harness) talk to each other on one machine — one agent advises, the other executes, both can ask follow-ups.",
+  "description": "Control DeepSeek Harness from the AI client you already use: a plugin-first interop layer with a durable, session-aware mailbox (working name; see docs/roadmap.md).",
   "keywords": [
     "agents",
     "coding-agent",
-    "codex",
     "deepseek-harness",
     "dsh",
-    "multi-agent",
+    "codex",
+    "claude-code",
+    "cursor",
+    "copilot",
+    "interop",
     "mailbox",
     "mcp",
-    "orchestration"
+    "at-least-once",
+    "durable-delivery",
+    "multi-agent"
   ],
   "license": "MIT",
   "type": "module",

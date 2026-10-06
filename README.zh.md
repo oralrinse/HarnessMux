@@ -1,46 +1,83 @@
-# agent-bridge
+# Agent Interlink
 
-**两个编码 agent，一个邮箱——而且投递保证能扛住崩溃。**
+> **用你已经在用的 AI 客户端，直接控制 DeepSeek Harness。**
+>
+> 面向 AI 客户端与 DeepSeek Harness 的「插件优先」互操作层。
+> *（`agent-bridge` 是当前的工作名——见[命名](docs/roadmap.md#decisions-open)。）*
 
-`agent-bridge` 让同一台机器上的两个编码 agent 互相说话：一个指导，一个执行，双方都能追问。
-它是为 [OpenAI Codex](https://github.com/openai/codex) ⇄ [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
-（DSH）做的，但传输层与 agent 无关：协议就是一堆 JSON 文件，任何能读写文件的进程都能加入。
+```text
+Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
+                          │
+                          ▼
+                    Agent Interlink
+                          │
+                          ▼
+                   DeepSeek Harness
+```
+
+- ✓ **插件优先** —— 装进 harness、装进你的客户端，完成
+- ✓ **面向已存在的活动会话** —— 能送到你已经打开、正在用的 DSH 会话
+- ✓ **持久投递** —— 没人在跑时到达的消息会被**留下**，而不是丢掉
+- ✓ **会话级路由** —— 由一条明确的 binding 决定目标，绝不靠猜
+- ✓ **抗崩溃** —— at-least-once，崩溃窗口已被测试：**duplicate, not lost**
+- ✓ **离线/异步** —— 报告、提问、通知都能走这条线，不只是派活
+- ✓ **agent 之间不再靠人复制粘贴**
 
 [English](README.md) | 中文
 
 ---
 
-## 为什么要这么做
+## 它解决什么
 
-你想让 Codex 指挥 DSH 干活，又不想自己当传声筒。而显而易见的做法都行不通，这决定了整个设计：
+你已经习惯待在某一个 AI 客户端里，而你要做的活在 DeepSeek Harness 里。这个项目把两者接起来，让你不必当传声筒：
 
-| 障碍 | 后果 |
+| 你的诉求 | 它提供 |
 |---|---|
-| 运行中的 Codex 会话无法被外部进程注入（[openai/codex#33556](https://github.com/openai/codex/issues/33556)） | 协议层不能假设"推送"，投递必须是拉取式的 |
-| 运行中的 DSH 会话同样无法被外部注入（每进程随机 launch token） | 只有**进程内插件**能唤醒会话，所以两端各需一个插件 |
-| agent 只在人按下回车时才动 | 消息必须能安全地等待，且等待期间绝不丢失 |
+| 在编辑器/CLI 里直接指挥 DSH 干活 | 你的客户端可以调用的 mailbox 工具 |
+| 合上电脑或崩溃后指令还在 | 带租约、重试与审计流的持久投递 |
+| 送到你**此刻开着**的那个会话 | 活动会话投递，由明确 binding 指定目标 |
+| 会话之间互不串味 | `actor / endpoint / session / thread` 严格区分；未绑定就保持未绑定 |
+| 让同伴 agent 反过来问你 | 双向线程；回复留在同一 thread |
+| 同时保证安全 | `advisory` / `delegated` 信任分级，由 binding 决定 |
 
-于是设计干净地拆成两半：
+### 与「worker 编排器」的区别
 
-- **协议**让"等待"是安全的（持久、可认领、可审计）；
-- **各宿主的插件**让"唤醒"成为可能（进程内、尽力而为）。
+外部编排器的做法是：派一个任务，然后**启动并管理一个 worker** 去跑。
 
-## 你会得到什么
+> 与 worker 编排器不同，本项目能把消息投递到**已存在的** DeepSeek Harness 会话，而不是要求每个任务都必须跑在新拉起的 worker 里。
 
-- **消息不可变，投递与消息分离。** 消息是"说 了什么"，投递是"正在交给谁、进行到哪"。一条消息可以扇出给多个接收方，重试是**同一条投递**上的新 attempt。
-- **诚实声明的 at-least-once。** `queue → claim(租约) → ack`。握手成功与写 ack 之间的崩溃窗口是**被写进文档、被测试、并被重投**的：**duplicate but not lost**。不假装 exactly-once。
-- **显式路由。** `actor / endpoint / session / thread` 严格区分。未绑定的线程保持 `awaitingBinding`——桥**绝不猜**你指的是哪个会话，也绝不广播。
-- **信任分级。** `advisory`（对方输入是上下文，不是权威）与 `delegated`（受委托要执行）。由 binding/投递决定，不由正文决定。
-- **可审计的迁移。** v1 桥导入时 legacy id 原样保留、v1 `read/` 绝不伪装成 v2 的 ack、副本冲突即中止、重复运行零变更。
-- **核心与 DSH 插件零运行时依赖。** Node ≥ 22。
+由此带来几个只有这种设计才有的性质：目标可以是**人正在看着**的会话；回合进行中到达的工作会并入该回合；什么都没在跑时到达的消息会**等待**并在该会话下次运行时送达；同一套底座也承载离线通知与提问，而不只是任务派发。托管 worker 模式计划作为**并列的另一种模式**（P5），不是替代品。
+
+## 状态：哪些已验证，哪些没有
+
+已在真机 + 真实模型上端到端验证（[完整报告](docs/REPORT-p0.5-cutover.md)）：
+
+| 能力 | 状态 |
+|---|---|
+| 投递进**运行中**的 DSH 会话（claim → steer → ack，恰好一次） | ✅ 已验证 |
+| 会话路由：被绑定的会话收到，另一个活动会话收不到 | ✅ 已验证 |
+| 未绑定投递绝不被消费（`awaitingBinding`） | ✅ 已验证 |
+| 握手成功与 ack 之间崩溃 | ✅ 已验证：**duplicate, not lost** |
+| 租约恢复、重试退避、watcher 单例 | ✅ 已验证 |
+| v1 → v2 迁移：legacy id 保留、`read/` 绝不变成 ack、幂等 | ✅ 已验证 |
+| provider 侧工具契约（模型真的会调用该工具） | ✅ 已验证 |
+
+诚实的边界——部署前请读：
+
+| 边界 | 说明 |
+|---|---|
+| **没有 idle 唤醒** | 只有会话在运行时才会投递。空闲会话不会被唤醒，投递会等待。*运行中 → 近实时；空闲 → 等它下次运行。* |
+| **不是 exactly-once** | 传输层按设计是 at-least-once，消费方需容忍重复的 deliveryId。 |
+| **Codex 之外的客户端** | **计划中**，尚未支持（P3.3/P3.4）。每个都要按 Codex 的标准验证过之后才会列进上表。 |
+| **只有一个 receiver** | DeepSeek Harness 是唯一已实现的 receiver。Receiver 接口只是规范，尚未落地（[receiver-api.md](docs/receiver-api.md)）。 |
 
 ## 快速开始
 
 ```sh
-git clone <本仓库> agent-bridge
-cd agent-bridge
+git clone <本仓库> agent-interlink
+cd agent-interlink
 node lib/mailbox-v2.mjs --root ./bridge init
-npm test                       # 8 套测试，不需要网络、不需要 API key
+npm test                       # 8 套测试，离线，不需要 API key
 ```
 
 发一条消息并看它被投递：
@@ -52,61 +89,66 @@ node lib/mailbox-v2.mjs --root ./bridge bind  <threadId> --endpoint dsh-endpoint
 node lib/mailbox-v2.mjs --root ./bridge inbox --actor dsh
 ```
 
-让一个**活着的**会话验证完整闭环（`<sessionId>` 是宿主报告的会话 id；DSH 下就是 `$DSH_SESSION_ID`）：
+让一个**活着的**会话验证闭环（`<sessionId>` 是客户端/harness 报告的会话 id；DSH 下为 `$DSH_SESSION_ID`）：
 
 ```sh
 node tests/ask-session.mjs <sessionId> --marker HELLO-1
-# 目标会话正在跑回合时，状态会从 queued 变成 acked
+# 该会话跑回合期间，状态从 queued 变成 acked
 ```
 
-投递会落在"该会话在 pump 跳动（每 10 秒）时仍在运行"的那个回合里。如果会话是空闲的，投递会正确地等在 `queue/`——见[限制](#限制)。
+投递落在"pump 跳动（每 10 秒）时该会话仍在运行"的那个回合里。会话空闲时它会正确地等在 `queue/`——见上面的边界。
 
 ## 装进 DeepSeek Harness
 
-插件是一个 DSH profile bundle（由你的 profile patch 挂载的 Cordis 插件）：
+receiver 是一个 DSH profile bundle（由 profile patch 挂载的 Cordis 插件）：
 
 ```sh
 node scripts/install.mjs --dsh-profile desktop     # 改写 package.json + cordis.patch.yml
 # 然后重启 harness：已挂载的插件不会热重载
 ```
 
-`--dry-run` 只打印计划，`--print-only` 打印等价的手工步骤。安装器只改你的 profile、写 `.bak-<时间戳>` 备份、且可重复运行。
+`--dry-run` 只打印计划，`--print-only` 打印等价手工步骤。安装器只改你的 profile、写 `.bak-<时间戳>` 备份、可重复运行。
 
-装好后在会话里确认：让 agent 跑 `mailbox action=status`。它应该回 `protocol: v2 … invariants=ok`，而不是 v1 的计数器。
+装好后在会话里确认：让 agent 跑 `mailbox action=status`，应回 `protocol: v2 … invariants=ok`。
 
-## 接上 Codex
+## 接入客户端
 
-`plugin-codex/` 是一个 Codex 插件（skills + 可选的钩子模板），并在 `.agents/plugins/marketplace.json` 提供本地 marketplace：
+**Codex** —— `plugin-codex/` 提供 manifest、skill 与可选钩子模板，并带一个本地 marketplace：
 
 ```sh
 codex plugin marketplace add <本仓库路径>
 codex plugin add agent-bridge@agent-bridge
 ```
 
-那个 skill 教 Codex 何时该读、何时该回；即使不装，也仍然可以通过上面的 CLI 完成一切。
+**Claude Code、Cursor、VS Code / Copilot** —— 计划中的 adapter（P3.3/P3.4）。它们的目标是**复用同一套共享 MCP mailbox 工具**，因此工作量是一个 manifest + 一层薄 adapter，而不是再写一个客户端实现。
+
+**其它任何东西** —— CLI 是一等公民，不是降级方案：它是调试路径、CI 路径，也是那些本项目永远不会为其写插件的语言与客户端的集成路径。
 
 ## 目录结构
 
 ```
-lib/core-v2.mjs     协议 v2：消息、投递、认领、ack、路由、不变量
-lib/mailbox-v2.mjs  v2 CLI（send/reply/deliver/inbox/claim/ack/release/verify/…）
-lib/core.mjs        协议 v1（保留用于迁移与回滚）
-lib/mailbox.mjs     v1 CLI，迁移器会用到
-lib/migrate.mjs     v1 → v2 导入（带审计规则）
-plugin/             DeepSeek Harness 宿主插件（工具 + 简报 + 投递 pump）
-plugin-codex/       Codex 插件（清单、skill、钩子模板）
-scripts/install.mjs DSH profile 安装器
-docs/protocol.md    线格式与它的不变量
-docs/cutover.md     如何把线上桥从 v1 切到 v2
-docs/REPORT-*.md    一次真实 cutover，含证据与它挖出的缺陷
-DESIGN.md           完整设计、评审裁定、以及未决问题
-tests/              测试套件（见下）
+lib/core-v2.mjs      协议 v2：消息、投递、认领、ack、路由、不变量
+lib/mailbox-v2.mjs   v2 CLI（send/reply/deliver/inbox/claim/ack/release/verify/…）
+lib/core.mjs         协议 v1（保留用于迁移与回滚）
+lib/mailbox.mjs      v1 CLI，迁移器会用到
+lib/migrate.mjs      v1 → v2 导入（带审计规则）
+plugin/              DeepSeek Harness **receiver**（工具 + 简报 + 投递 pump）
+plugin-codex/        Codex 客户端插件（清单、skill、钩子模板）
+scripts/install.mjs  DSH profile 安装器
+docs/positioning.md  项目是什么、以及刻意不声称什么
+docs/roadmap.md      阶段、规划中的仓库结构、未决决策
+docs/receiver-api.md receiver 接口 + 能力模型（规范）
+docs/protocol.md     线格式与它的不变量
+docs/cutover.md      如何把线上桥从 v1 切到 v2
+docs/REPORT-*.md     一次真实 cutover，含证据与它挖出的缺陷
+DESIGN.md            工程记录与评审裁定
+tests/               测试套件（见下）
 ```
 
 ## 测试
 
 ```sh
-npm test          # 8 套：协议、CLI、迁移、插件、故障注入——全部离线
+npm test          # 8 套：协议、CLI、迁移、receiver、故障注入——全部离线
 npm run test:live # 对真实 DSH harness + 真实模型（需要装好 DSH）
 ```
 
@@ -119,16 +161,15 @@ npm run test:live # 对真实 DSH harness + 真实模型（需要装好 DSH）
 | `manifest.test.mjs` | DSH bundle 契约，以及测试绝不碰 root 缓存 |
 | `plugin.test.mjs` | provider 可见的工具描述符、output 契约、注入消息的 id |
 | `plugin-v2.test.mjs` | claim→steer→ack、失败即释放、会话隔离、unrouted 安全 |
-| `cutover-faults.test.mjs` | V4-3/V4-4/V4-4b：steer 失败、崩溃窗口、长租约重启 |
+| `cutover-faults.test.mjs` | steer 失败、崩溃窗口、长租约重启 |
 
-## 限制
+现场探针与安装器都从环境变量解析宿主，因此仓库里不写死任何机器：设 `DSH_CLI`（launcher 路径）或 `DSH_INSTALL_ROOT`（安装目录），以及 `AGENT_BRIDGE_CWD`（探针会话使用的工作区）。
 
-部署前请读。这些是宿主的性质，不是本项目要修的 bug。
+pre-commit 钩子会阻止"开发机绝对路径"与"凭据"进入本仓库历史：
 
-1. **没有 idle 唤醒。** 只有目标会话**正在运行**时才会投递（实测：全空闲时投递在 `queued` 停留 45 秒）。能力表述：*运行中的会话 → 近实时注入；空闲会话 → 投递等到该会话下次运行为止。*
-2. **恢复受租约约束。** 崩溃后，未 ack 的投递要等租约到期才重投（租约有效期内不会提前重投——这是刻意的）。
-3. **插件改动不会热重载。** 改插件或其配置需要重启 harness。诊断可用 `debugLog` 配置项，它能让运行中的应用写跟踪文件。
-4. **投递不是任务。** `ack` 的含义是"宿主已接受本次交接"。需要业务级幂等，请自带 `taskId`。
+```sh
+sh scripts/install-hooks.sh    # 每个 clone 执行一次（钩子不受版本控制）
+```
 
 ## 安全
 
