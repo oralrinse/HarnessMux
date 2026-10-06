@@ -1,0 +1,15 @@
+{
+  "$comment": "MCP server registration for clients that take a JSON config. Copy this block into the client's own MCP configuration file; the command path is absolute by design, because MCP clients do not resolve npm package names in this field.",
+  "mcpServers": {
+    "harnessmux": {
+      "command": "node",
+      "args": [
+        "REPLACE_WITH_ABSOLUTE_PATH/packages/mcp/server.mjs"
+      ],
+      "env": {
+        "HARNESSMUX_DIR": "REPLACE_WITH_ABSOLUTE_BRIDGE_PATH",
+        "HARNESSMUX_ACTOR": "client"
+      }
+    }
+  }
+}

@@ -41,13 +41,31 @@ provider contract          the compiled tool descriptor is what the model actual
 One shared client layer, thin per-client adapters. A copy of the whole plugin per
 client is explicitly rejected.
 
-| Phase | Deliverable | Notes |
+| Phase | Deliverable | Status |
 |---|---|---|
-| **P3.1** | **Portable core**: shared plugin metadata, skills, MCP mailbox tools, shared protocol client | the mailbox surface as MCP tools so any MCP-capable client gets it for free; the CLI stays as the debugging/CI surface |
-| **P3.2** | **Codex adapter**: Codex-specific hooks (lifecycle polling), packaging, install/distribution | first client because it is already exercised daily |
-| **P3.3** | **Claude Code adapter**: Claude plugin manifest, its hooks, reusing the shared MCP tools | should be a manifest + adapter, not a second client implementation |
-| **P3.4** | **Other clients**: Cursor, VS Code / GitHub Copilot, other MCP-capable or plugin-capable clients | scope defined by what each host actually allows, measured per host |
-| **P3.5** | **Compatibility matrix + CI** | which client has which capability, and a test that keeps the claim honest |
+| **P3.1** | **Portable core**: shared MCP tool layer, mailbox skill, MCP registration, packaging notes | ✅ **MCP server built and contract-tested** (`packages/mcp/`), shared assets in `packages/portable-plugin/`; the Codex adapter is not yet wired to it |
+| **P3.2** | **Codex adapter**: wire the shared MCP server, Codex-specific hooks (lifecycle polling), packaging, install/distribution | ⏳ next |
+| **P3.3** | **Claude Code adapter**: Claude plugin manifest, its hooks, reusing the shared MCP tools | ⏳ |
+| **P3.4** | **Other clients**: Cursor, VS Code / GitHub Copilot, other MCP-capable or plugin-capable clients | ⏳ |
+| **P3.5** | **Compatibility matrix + CI** | ⏳ |
+
+**P3.1 decided two open questions** (see the ADR for the reasoning):
+
+- **D2 — packaging format.** MCP-first for tools: `packages/mcp/server.mjs` exposes
+  the mailbox as eight MCP tools over stdio, and the CLI stays for debugging, CI, and
+  clients without MCP. Client adapters consume `@harnessmux/portable-plugin` for paths
+  and registration instead of copying anything.
+- **The MCP SDK question** — hand-rolled rather than the official SDK, because the SDK
+  brings an HTTP stack this layer does not offer:
+  [ADR 0001](adr/0001-mcp-server-transport.md). Revisit when Streamable HTTP is
+  actually needed.
+
+The mailbox tools every client sees (contract-tested in `tests/mcp-contract.test.mjs`):
+
+```text
+send_message   read_messages   reply_message   list_threads
+list_endpoints list_sessions   bind_thread     get_status
+```
 
 ### P4 — Install / Update / UX
 

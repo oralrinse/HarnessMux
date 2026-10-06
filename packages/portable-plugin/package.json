@@ -1,0 +1,23 @@
+{
+  "name": "@harnessmux/portable-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared, client-neutral HarnessMux assets: the MCP server registration, the mailbox skill, and the packaging notes each client adapter builds on.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "mcp.json",
+    "skills",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "skills",
+    "deepseek-harness",
+    "harnessmux"
+  ]
+}

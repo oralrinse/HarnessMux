@@ -124,17 +124,43 @@ answer `protocol: v2 … invariants=ok`.
 
 ## Connect a client
 
-**Codex** — `plugin-codex/` ships a manifest, a skill and an opt-in hook template, plus
-a local marketplace:
+Any MCP-capable client gets the mailbox tools from one shared server:
+
+```sh
+node packages/mcp/server.mjs            # stdio; run it from the client's MCP config
+```
+
+```jsonc
+// what a client config needs — absolute paths, because MCP clients do not resolve
+// package names here (packages/portable-plugin/index.mjs prints this for you)
+{
+  "mcpServers": {
+    "harnessmux": {
+      "command": "node",
+      "args": ["<repo>/packages/mcp/server.mjs"],
+      "env": { "HARNESSMUX_DIR": "<bridge root>", "HARNESSMUX_ACTOR": "client" }
+    }
+  }
+}
+```
+
+The eight tools every client sees — `send_message`, `read_messages`, `reply_message`,
+`list_threads`, `list_endpoints`, `list_sessions`, `bind_thread`, `get_status` — all
+call the same protocol-v2 core, so no client can observe a different meaning of `ack`,
+delivery, lease or binding. Their contract (names, schemas, error semantics, and
+behaviour against the same v2 state) is pinned by `tests/mcp-contract.test.mjs`.
+
+**Codex** — `packages/adapter-codex/` ships the Codex manifest, a skill and an opt-in
+hook template, plus a local marketplace:
 
 ```sh
 codex plugin marketplace add <path to this repo>
 codex plugin add harnessmux@harnessmux
 ```
 
-**Claude Code, Cursor, VS Code / Copilot** — planned adapters (P3.3/P3.4). They are
-meant to reuse the same shared MCP mailbox tools as Codex, so the work is a manifest
-plus a thin adapter, not another client implementation.
+**Claude Code, Cursor, VS Code / Copilot** — planned adapters (P3.3/P3.4). They reuse
+the same MCP tools, so the work is a manifest plus a thin adapter, not another client
+implementation.
 
 **Anything else** — the CLI is a first-class surface, not a fallback: it is the
 debugging path, the CI path, and the integration path for languages and clients this
@@ -143,29 +169,31 @@ project will never have a plugin for.
 ## Layout
 
 ```
-lib/core-v2.mjs      protocol v2: messages, deliveries, claims, acks, routing, invariants
-lib/mailbox-v2.mjs   the v2 CLI (send/reply/deliver/inbox/claim/ack/release/verify/…)
-lib/core.mjs         protocol v1 (kept for migration + rollback)
-lib/mailbox.mjs      the v1 CLI, used by the migration
-lib/migrate.mjs      v1 → v2 import with the audited rules
-plugin/              the DeepSeek Harness **receiver** (tool + briefing + delivery pump)
-plugin-codex/        the Codex client plugin (manifest, skill, hook template)
-scripts/install.mjs  installer for a DSH profile
-docs/positioning.md  what the project is, and what it deliberately does not claim
-docs/roadmap.md      phases, the planned repo layout, and the open decisions
-docs/receiver-api.md the receiver interface + capability model (specification)
-docs/protocol.md     the wire format and its invariants
-docs/cutover.md      how to switch a live bridge from v1 to v2
-docs/REPORT-*.md     a real cutover, with evidence and the defects it uncovered
-DESIGN.md            the engineering record and its review verdicts
-tests/               the suites (below)
+packages/core/           protocol v1 + v2 + migration (platform-independent, no deps)
+packages/cli/            the harnessmux CLIs (send/reply/deliver/inbox/claim/ack/verify/…)
+packages/mcp/            the shared MCP tool layer every client uses
+packages/portable-plugin/ shared client assets: skill, MCP registration, path resolution
+packages/adapter-codex/  the Codex client plugin (manifest, skill, hook template)
+packages/receiver-dsh/   the DeepSeek Harness **receiver** (tool + briefing + pump)
+docs/positioning.md      what the project is, and what it deliberately does not claim
+docs/roadmap.md          phases, the planned repo layout, and the open decisions
+docs/receiver-api.md     the receiver interface + capability model (specification)
+docs/adr/                decisions with their reasoning (e.g. why MCP is hand-rolled)
+docs/protocol.md         the wire format and its invariants
+docs/cutover.md          how to switch a live bridge from v1 to v2
+docs/REPORT-*.md         a real cutover, with evidence and the defects it uncovered
+DESIGN.md                the engineering record and its review verdicts
+examples/live/           live probes and field diagnostics (need a real harness)
+tests/                   the suites (below)
+tools/relink.mjs         repairs relative imports after a layout move
 ```
 
 ## Tests
 
 ```sh
-npm test          # 8 suites: protocol, CLI, migration, receiver, faults — all offline
+npm test          # 9 suites: protocol, CLI, migration, receiver, MCP contract, faults
 npm run test:live # against a real DSH harness + real model (needs DSH installed)
+npm run mcp       # start the MCP server by hand to inspect the roster
 ```
 
 | Suite | What it pins |
@@ -177,6 +205,7 @@ npm run test:live # against a real DSH harness + real model (needs DSH installed
 | `manifest.test.mjs` | the DSH bundle contract, and that tests never touch the root cache |
 | `plugin.test.mjs` | provider-facing tool descriptor, output contract, injected-message ids |
 | `plugin-v2.test.mjs` | claim→steer→ack, release on failure, session isolation, unrouted safety |
+| `mcp-contract.test.mjs` | the client-visible tool roster, schemas, envelopes and error semantics |
 | `cutover-faults.test.mjs` | steer failure, the crash window, long-lease restart |
 
 The live probes and the installer resolve the host from the environment, so nothing

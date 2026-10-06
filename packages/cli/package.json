@@ -1,0 +1,25 @@
+{
+  "name": "@harnessmux/cli",
+  "version": "0.2.0",
+  "private": true,
+  "description": "HarnessMux command line: send, reply, deliver, inbox, claim, ack, release, reconcile, verify, migrate. The debugging, CI and cross-language surface — not a fallback.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "harnessmux": "./mailbox.mjs",
+    "harnessmux-v2": "./mailbox-v2.mjs"
+  },
+  "files": [
+    "mailbox.mjs",
+    "mailbox-v2.mjs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "cli",
+    "mailbox",
+    "delivery",
+    "deepseek-harness"
+  ]
+}

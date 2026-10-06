@@ -1,0 +1,26 @@
+{
+  "name": "@harnessmux/mcp",
+  "version": "0.2.0",
+  "private": true,
+  "description": "The shared MCP tool layer: send_message, read_messages, reply_message, list_threads, list_endpoints, list_sessions, bind_thread, get_status — over the protocol-v2 core.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./server.mjs"
+  },
+  "bin": {
+    "harnessmux-mcp": "./server.mjs"
+  },
+  "files": [
+    "server.mjs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tools",
+    "deepseek-harness"
+  ]
+}

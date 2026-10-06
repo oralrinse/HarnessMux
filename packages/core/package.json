@@ -1,0 +1,30 @@
+{
+  "name": "@harnessmux/core",
+  "version": "0.2.0",
+  "private": true,
+  "description": "HarnessMux protocol core: immutable messages, deliveries, claims/leases, acks, bindings, endpoints, and the v1 to v2 migration. Platform-independent and dependency-free.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./core.mjs",
+    "./v1": "./core.mjs",
+    "./v2": "./core-v2.mjs",
+    "./migrate": "./migrate.mjs"
+  },
+  "files": [
+    "core.mjs",
+    "core-v2.mjs",
+    "migrate.mjs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "protocol",
+    "at-least-once",
+    "delivery",
+    "lease",
+    "binding",
+    "deepseek-harness"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@harnessmux/adapter-codex",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Codex adapter: the Codex plugin manifest, the shared mailbox skill, and an opt-in lifecycle hook template. Owns only Codex-specific packaging and hooks; the tools and instructions come from @harnessmux/portable-plugin.",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    ".codex-plugin",
+    "hooks",
+    "skills",
+    "README.md"
+  ],
+  "keywords": [
+    "codex",
+    "plugin",
+    "adapter",
+    "deepseek-harness"
+  ]
+}

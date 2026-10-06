@@ -112,43 +112,72 @@ node scripts/install.mjs --dsh-profile desktop     # 改写 package.json + cordi
 
 ## 接入客户端
 
-**Codex** —— `plugin-codex/` 提供 manifest、skill 与可选钩子模板，并带一个本地 marketplace：
+任何支持 MCP 的客户端都从**同一个共享 server** 拿到邮箱工具：
+
+```sh
+node packages/mcp/server.mjs            # stdio；由客户端的 MCP 配置拉起
+```
+
+```jsonc
+// 客户端配置需要的内容——必须是绝对路径，因为 MCP 客户端不会在这里解析包名
+// （packages/portable-plugin/index.mjs 可以直接帮你打印这段）
+{
+  "mcpServers": {
+    "harnessmux": {
+      "command": "node",
+      "args": ["<仓库>/packages/mcp/server.mjs"],
+      "env": { "HARNESSMUX_DIR": "<桥根目录>", "HARNESSMUX_ACTOR": "client" }
+    }
+  }
+}
+```
+
+每个客户端看到的 8 个工具 —— `send_message`、`read_messages`、`reply_message`、
+`list_threads`、`list_endpoints`、`list_sessions`、`bind_thread`、`get_status` ——
+全部调用同一个 protocol-v2 核心，因此**任何客户端都不可能看到不同的 `ack`/delivery/lease/binding 语义**。
+它们的契约（工具名、schema、错误语义、以及在同一 v2 状态下的行为一致性）由
+`tests/mcp-contract.test.mjs` 固定。
+
+**Codex** —— `packages/adapter-codex/` 提供 Codex 清单、skill 与可选钩子模板，并带本地 marketplace：
 
 ```sh
 codex plugin marketplace add <本仓库路径>
 codex plugin add harnessmux@harnessmux
 ```
 
-**Claude Code、Cursor、VS Code / Copilot** —— 计划中的 adapter（P3.3/P3.4）。它们的目标是**复用同一套共享 MCP mailbox 工具**，因此工作量是一个 manifest + 一层薄 adapter，而不是再写一个客户端实现。
+**Claude Code、Cursor、VS Code / Copilot** —— 计划中的 adapter（P3.3/P3.4）。它们复用同一套 MCP 工具，
+因此工作量是一个 manifest + 一层薄 adapter，而不是再写一个客户端实现。
 
 **其它任何东西** —— CLI 是一等公民，不是降级方案：它是调试路径、CI 路径，也是那些本项目永远不会为其写插件的语言与客户端的集成路径。
 
 ## 目录结构
 
 ```
-lib/core-v2.mjs      协议 v2：消息、投递、认领、ack、路由、不变量
-lib/mailbox-v2.mjs   v2 CLI（send/reply/deliver/inbox/claim/ack/release/verify/…）
-lib/core.mjs         协议 v1（保留用于迁移与回滚）
-lib/mailbox.mjs      v1 CLI，迁移器会用到
-lib/migrate.mjs      v1 → v2 导入（带审计规则）
-plugin/              DeepSeek Harness **receiver**（工具 + 简报 + 投递 pump）
-plugin-codex/        Codex 客户端插件（清单、skill、钩子模板）
-scripts/install.mjs  DSH profile 安装器
-docs/positioning.md  项目是什么、以及刻意不声称什么
-docs/roadmap.md      阶段、规划中的仓库结构、未决决策
-docs/receiver-api.md receiver 接口 + 能力模型（规范）
-docs/protocol.md     线格式与它的不变量
-docs/cutover.md      如何把线上桥从 v1 切到 v2
-docs/REPORT-*.md     一次真实 cutover，含证据与它挖出的缺陷
-DESIGN.md            工程记录与评审裁定
-tests/               测试套件（见下）
+packages/core/            协议 v1 + v2 + 迁移（平台无关，零依赖）
+packages/cli/             harnessmux CLI（send/reply/deliver/inbox/claim/ack/verify/…）
+packages/mcp/             所有客户端共用的 MCP 工具层
+packages/portable-plugin/ 共享客户端资产：skill、MCP 注册模板、路径解析
+packages/adapter-codex/   Codex 客户端插件（清单、skill、钩子模板）
+packages/receiver-dsh/    DeepSeek Harness **receiver**（工具 + 简报 + 投递 pump）
+docs/positioning.md       项目是什么、以及刻意不声称什么
+docs/roadmap.md           阶段、规划中的仓库结构、未决决策
+docs/receiver-api.md      receiver 接口 + 能力模型（规范）
+docs/adr/                 带推理过程的决策记录（例如为何手写 MCP）
+docs/protocol.md          线格式与它的不变量
+docs/cutover.md           如何把线上桥从 v1 切到 v2
+docs/REPORT-*.md          一次真实 cutover，含证据与它挖出的缺陷
+DESIGN.md                 工程记录与评审裁定
+examples/live/            现场探针与实地诊断（需要真实 harness）
+tests/                    测试套件（见下）
+tools/relink.mjs          目录搬迁后修复相对引用
 ```
 
 ## 测试
 
 ```sh
-npm test          # 8 套：协议、CLI、迁移、receiver、故障注入——全部离线
+npm test          # 9 套：协议、CLI、迁移、receiver、MCP 契约、故障注入
 npm run test:live # 对真实 DSH harness + 真实模型（需要装好 DSH）
+npm run mcp       # 手工启动 MCP server，检查工具清单
 ```
 
 | 套件 | 固定住什么 |
@@ -160,6 +189,7 @@ npm run test:live # 对真实 DSH harness + 真实模型（需要装好 DSH）
 | `manifest.test.mjs` | DSH bundle 契约，以及测试绝不碰 root 缓存 |
 | `plugin.test.mjs` | provider 可见的工具描述符、output 契约、注入消息的 id |
 | `plugin-v2.test.mjs` | claim→steer→ack、失败即释放、会话隔离、unrouted 安全 |
+| `mcp-contract.test.mjs` | 客户端可见的工具清单、schema、报文信封与错误语义 |
 | `cutover-faults.test.mjs` | steer 失败、崩溃窗口、长租约重启 |
 
 现场探针与安装器都从环境变量解析宿主，因此仓库里不写死任何机器：设 `DSH_CLI`（launcher 路径）或 `DSH_INSTALL_ROOT`（安装目录），以及 `HARNESSMUX_CWD`（探针会话使用的工作区）。
