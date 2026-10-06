@@ -67,6 +67,24 @@ Generic MCP      ┘         thin adapters)              mailbox)         (live 
   adapters (P3.3/P3.4). Each will be listed as supported only after it is verified
   like Codex was.
 
+## 3b. Compatibility tiers
+
+Evidence, not intent. A client appears with a ✅ only after it has been driven against a
+running DeepSeek Harness session on a real machine.
+
+| Client | Shared MCP | Shared skill | Lifecycle receive | How it is wired | Real-machine status |
+|---|---|---|---|---|---|
+| **Codex** | ✅ | ✅ | ✅ injected at `SessionStart` / `UserPromptSubmit` | adapter: manifest, `.mcp.json`, pointer file, user-level hooks (hooks need trust) | ✅ [REPORT-p3.2](REPORT-p3.2-codex-adapter.md) |
+| **Claude Code** | ✅ | ✅ | ✅ injected via `hookSpecificOutput.additionalContext` | adapter: plugin ships `.mcp.json`, `hooks/hooks.json`, skill; `${CLAUDE_PLUGIN_ROOT}`; no trust step | ✅ [REPORT-p3.3c](REPORT-p3.3c-claude-acceptance.md) |
+| **Cursor** | expected ✅ | expected ✅ | **pull** (expected) | plugin: reuses the Claude-shaped manifest; MCP must be declared as `"mcpServers": "./.mcp.json"` | ⏳ [reconnaissance done](REPORT-p3.4a-cursor-recon.md), live run blocked |
+| **VS Code / GitHub Copilot** | untested | untested | untested | planned, P3.4-B | ⏳ |
+| **Generic MCP client** | ✅ by construction | — | pull only | the MCP server over stdio; no plugin needed | ⏳ smoke test |
+
+Two axes matter and they are independent: whether a client can **send** (any MCP client can,
+through the shared server) and whether it can **receive without asking** (only a client with a
+lifecycle hook that injects context, and only while it is running). "Pull" is a legitimate
+tier, not a shortfall: the message waits durably and reaches the model on the client's next
+turn that consults the mailbox.
 ## 4. What this project is for
 
 Bring the client you already live in to the harness you actually run:

@@ -21,5 +21,6 @@
   ],
   "skills": [
     "./skills/"
-  ]
+  ],
+  "mcpServers": "./.mcp.json"
 }
