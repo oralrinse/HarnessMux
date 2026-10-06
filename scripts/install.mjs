@@ -21,10 +21,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..");
@@ -330,16 +330,141 @@ async function installCodexAdapter() {
 	].join("\n"));
 }
 
+/** This machine's Claude Code home (`CLAUDE_CONFIG_DIR` wins, then `~/.claude`). */
+function claudeHome() {
+	return process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+}
+
+/** Paths the Claude adapter owns. */
+function claudePaths() {
+	const home = claudeHome();
+	return {
+		home,
+		// Claude auto-loads every directory under skills/ as `<name>@skills-dir`.
+		plugin: join(home, "skills", "harnessmux"),
+		pointer: join(home, "harnessmux.json"),
+		adapter: join(REPO_ROOT, "packages", "adapter-claude")
+	};
+}
+
+/**
+ * Install, upgrade or remove the Claude Code side of HarnessMux.
+ *
+ * Deliberately smaller than the Codex side. Reconnaissance showed which complexity
+ * Codex forced and Claude does not need:
+ *
+ *   - no launcher indirection — `${CLAUDE_PLUGIN_ROOT}` is substituted into `.mcp.json`
+ *     args, so the plugin can address its own files;
+ *   - no user-level hooks file — a plugin ships `hooks/hooks.json`, and it runs with no
+ *     trust step;
+ *   - no settings mutation — a directory under `~/.claude/skills/` auto-loads as
+ *     `<name>@skills-dir`.
+ *
+ * What remains is one link into the skills directory, plus a record of where the
+ * checkout is, because a *copied* plugin cannot reach `packages/core` on its own.
+ *
+ * @returns {Promise<void>} resolves when the change is applied or reported.
+ */
+async function installClaudeAdapter() {
+	const paths = claudePaths();
+	const remove = options.uninstall === true;
+	const useLink = options.link === true;
+
+	if (remove) {
+		process.stdout.write("harnessmux: removing the Claude Code adapter\n");
+		if (existsSync(paths.plugin)) {
+			// A junction is removed as a link, never through its target.
+			const isLink = lstatSync(paths.plugin).isSymbolicLink();
+			if (!dryRun) {
+				if (isLink) rmSync(paths.plugin, { force: true });
+				else rmSync(paths.plugin, { recursive: true, force: true });
+			}
+			process.stdout.write(`${dryRun ? "[dry-run] " : ""}removed ${paths.plugin}${isLink ? " (link)" : ""}\n`);
+		} else {
+			process.stdout.write(`nothing installed at ${paths.plugin}\n`);
+		}
+		if (existsSync(paths.pointer)) {
+			if (!dryRun) rmSync(paths.pointer, { force: true });
+			process.stdout.write(`${dryRun ? "[dry-run] " : ""}removed ${paths.pointer}\n`);
+		}
+		process.stdout.write("\nClaude Code no longer has the HarnessMux MCP server, skill or hooks.\n");
+		process.stdout.write(`Your own ${join(paths.home, "settings.json")} was never modified.\n`);
+		return;
+	}
+
+	// 1. the plugin: linked for development, copied otherwise.
+	if (!existsSync(paths.adapter)) {
+		process.stderr.write(`harnessmux: the Claude adapter is missing at ${paths.adapter}\n`);
+		process.exit(1);
+	}
+	mkdirSync(dirname(paths.plugin), { recursive: true });
+	const existing = existsSync(paths.plugin);
+	const existingIsLink = existing && lstatSync(paths.plugin).isSymbolicLink();
+	const currentTarget = existingIsLink ? realpathSync(paths.plugin) : null;
+	const wantedTarget = realpathSync(paths.adapter);
+	const action = !existing ? "installed" : existingIsLink && currentTarget === wantedTarget ? "already current" : "updated";
+	if (action !== "already current" && !dryRun) {
+		if (existing) rmSync(paths.plugin, { recursive: true, force: true });
+		if (useLink) symlinkSync(paths.adapter, paths.plugin, "junction");
+		else cpSync(paths.adapter, paths.plugin, { recursive: true });
+	}
+	process.stdout.write(`${dryRun ? "[dry-run] " : ""}${action} ${paths.plugin} (${useLink ? "linked" : "copied"})\n`);
+
+	// 2. the pointer file: how a *copy* finds the rest of the checkout.
+	if (!dryRun) {
+		if (existsSync(paths.pointer)) backup(paths.pointer);
+		writeFileSync(paths.pointer, `${JSON.stringify({
+			checkout: REPO_ROOT,
+			core: join(REPO_ROOT, "packages", "core", "core-v2.mjs"),
+			adapter: paths.adapter,
+			actor: "claude"
+		}, null, 2)}\n`, "utf8");
+	}
+	process.stdout.write(`${dryRun ? "[dry-run] " : ""}recorded the checkout in ${paths.pointer}\n`);
+
+	// 3. prove it rather than assume it: the *installed* plugin must resolve the shared
+	// core from where it now lives, with CLAUDE_PLUGIN_ROOT pointing at the install.
+	const installedEntry = join(paths.plugin, "hooks-handlers", "resolve.mjs");
+	if (!dryRun) {
+		if (!existsSync(installedEntry)) {
+			process.stderr.write(`harnessmux: ${installedEntry} is missing — the install did not complete.\n`);
+			process.exit(1);
+		}
+		const probe = execFileSync(process.execPath, [
+			"-e",
+			`import(${JSON.stringify(pathToFileURL(installedEntry).href)}).then((m) => { const found = m.resolveCore(); if (!found) { console.error("no core resolved; tried:\\n  " + m.coreCandidates().join("\\n  ")); process.exit(1); } console.log(found); })`
+		], { encoding: "utf8", env: { ...process.env, CLAUDE_PLUGIN_ROOT: paths.plugin } }).trim();
+		process.stdout.write(`verified: the installed plugin resolves the core at ${probe}\n`);
+	}
+
+	process.stdout.write([
+		"",
+		"Next, in Claude Code:",
+		"  1. restart the session (or run /reload-plugins); it loads as harnessmux@skills-dir",
+		"  2. the HarnessMux MCP server (8 mailbox tools) and the mailbox skill come with it",
+		"",
+		"Verify:",
+		"  claude plugin details harnessmux",
+		"  node packages/adapter-claude/hooks-handlers/pending.mjs SessionStart   (silent when nothing waits)",
+		""
+	].join("\n"));
+}
+
 // --- dispatch -------------------------------------------------------------------
 // Kept after every declaration: each branch below runs at module top level, so a
 // `const` declared later in the file would still be in its temporal dead zone here.
-if (options["print-only"] === true && options.codex !== true) {
+if (options["print-only"] === true && options.codex !== true && options.claude !== true) {
 	process.stdout.write(MANUAL);
 	process.exit(0);
 }
 
 if (options.codex === true) {
 	await installCodexAdapter();
+	process.exit(0);
+}
+
+if (options.claude === true) {
+	await installClaudeAdapter();
 	process.exit(0);
 }
 

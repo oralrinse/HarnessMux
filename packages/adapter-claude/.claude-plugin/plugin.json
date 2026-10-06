@@ -1,0 +1,25 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "harnessmux",
+  "version": "0.2.0",
+  "description": "Control DeepSeek Harness from Claude Code: a durable mailbox with MCP tools, so work can be handed to an existing harness session and results come back on the same thread.",
+  "author": {
+    "name": "HarnessMux contributors"
+  },
+  "homepage": "https://github.com/oralrinse/HarnessMux",
+  "repository": "https://github.com/oralrinse/HarnessMux",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "mcp",
+    "mailbox",
+    "interop",
+    "agent",
+    "multi-agent",
+    "delegate"
+  ],
+  "skills": [
+    "./skills/"
+  ]
+}
