@@ -60,42 +60,47 @@ function claude(prompt, timeoutMs = 240_000) {
 	}
 }
 
-/** How a non-interactive Claude refuses when it has no usable credential. */
+/**
+ * Report up front whether a headless Claude can reach a model — as a warning, never a block.
+ *
+ * Two reasons it warns instead of exiting:
+ *
+ *   - Claude Code keeps its credential in a per-session store, so a shell that can run
+ *     `claude -p` is not necessarily one this process can spawn it from. A hard failure here
+ *     blocked a run in a shell where Claude was demonstrably authenticated.
+ *   - if authentication is genuinely missing, every condition below fails loudly anyway; the
+ *     point of saying it first is to stop those failures being read as adapter defects, which
+ *     is what happened twice before this existed.
+ */
 const AUTH_REFUSAL = /not logged in|please run \/login|failed to authenticate|invalid api key|authentication fails/iu;
 
-/**
- * Check that a headless Claude can reach a model at all, before judging anything.
- *
- * Without this the script ran every remaining step against an empty response and reported
- * the absence of output as failures of the adapter — which is what happened on the first two
- * attempts, and it cost a full round trip each time. A run that cannot reach a model is one
- * configuration problem; it must be said once, plainly, instead of being distributed across
- * six verdicts.
- */
-function requireUsableClaude() {
+function reportClaudeAvailability() {
 	const probe = claude("Reply with exactly: READY", 120_000);
 	const lines = probe.output.split("\n").map((line) => line.trim()).filter((line) => line !== "");
 	if (AUTH_REFUSAL.test(probe.output)) {
-		say("FATAL: a non-interactive `claude` cannot authenticate on this machine.");
+		say("WARNING: a non-interactive `claude` cannot authenticate from this process.");
 		say("");
-		say("       Claude Code here is pointed at a third-party endpoint:");
-		say(`         ANTHROPIC_BASE_URL = ${process.env.ANTHROPIC_BASE_URL ?? "(unset)"}`);
-		say(`         ANTHROPIC_MODEL    = ${process.env.ANTHROPIC_MODEL ?? "(unset)"}`);
-		say("       so it needs a credential for that endpoint. Its own message:");
+		say("         Claude Code here is pointed at a third-party endpoint:");
+		say(`           ANTHROPIC_BASE_URL = ${process.env.ANTHROPIC_BASE_URL ?? "(unset)"}`);
+		say(`           ANTHROPIC_MODEL    = ${process.env.ANTHROPIC_MODEL ?? "(unset)"}`);
+		say("         Its own message:");
+		for (const line of lines.slice(0, 4)) say(`           ${line}`);
 		say("");
-		for (const line of lines.slice(0, 6)) say(`         ${line}`);
+		say("         Every condition below will therefore fail, and none of those failures says");
+		say("         anything about the adapter. Run this from a shell where `claude -p` works, or");
+		say("         provide a key for this command only:");
+		say("           $env:ANTHROPIC_API_KEY = \"<key>\"; node examples/live/claude-acceptance.mjs");
 		say("");
-		say("       Provide one for this command only — this script never reads or copies it:");
-		say("         $env:ANTHROPIC_API_KEY = \"<your key>\"; node examples/live/claude-acceptance.mjs");
-		process.exit(3);
+		return false;
 	}
 	if (!probe.ok) {
-		say("FATAL: `claude -p` did not complete. Its output:");
+		say("WARNING: `claude -p` did not complete; the conditions below will fail. Its output:");
+		for (const line of lines.slice(0, 8)) say(`           ${line}`);
 		say("");
-		for (const line of lines.slice(0, 10)) say(`         ${line}`);
-		process.exit(3);
+		return false;
 	}
-	say(`claude -p        : usable (${Math.round(probe.ms / 1000)}s for a one-word reply)`);
+	say(`claude -p         : usable (${Math.round(probe.ms / 1000)}s for a one-word reply)`);
+	return true;
 }
 
 /** Wait until `predicate` holds or the budget runs out. */
@@ -129,20 +134,22 @@ if (!core.isBridgeRoot(bridge)) {
 }
 
 /**
- * The session to deliver to, chosen from evidence rather than from list order.
+ * The session to deliver to.
  *
- * A published endpoint can carry sessions that are no longer running: the first
- * acceptance run picked `sessions[0]` and addressed a session that had been gone for 50
- * minutes, so its delivery sat queued forever and D3 was reported as a failure of the
- * adapter when it was a failure of target selection. A delivery to a dead session is
- * indistinguishable from a delivery to an idle one, so the script refuses to guess:
+ * A published endpoint can carry sessions that are no longer running: the first acceptance
+ * run picked `sessions[0]` and addressed a session that had been gone for 50 minutes, so its
+ * delivery sat queued and D3 was reported as an adapter failure when it was a failure of
+ * target selection.
  *
- *   - `--target-session <id>` states it outright (use the session you are looking at);
- *   - otherwise every candidate must be confirmed by the harness publishing it *now*.
+ * What cannot be used to detect that: the endpoint file's age. The receiver republishes only
+ * when the live session set *changes*, so a continuously running session leaves the file
+ * untouched for hours while the published list stays perfectly accurate. An earlier version
+ * of this script refused to run in that situation and blocked a valid run.
  *
- * "Now" is judged from the endpoint file's own modification time: the receiver rewrites
- * it whenever its live session set changes, so a file untouched for a long time means no
- * session is actually live, whatever the stored list says.
+ * What is used instead: an explicit statement when one is given, and otherwise the published
+ * list, with the reason a delivery did not arrive reported precisely at D3 — a delivery to a
+ * stopped session and a delivery to an idle one are indistinguishable from here, and both
+ * mean "the target was not running", which is the documented boundary rather than a defect.
  */
 function pickTargetSession(endpoint) {
 	const explicit = process.argv.find((arg) => arg.startsWith("--target-session="))?.split("=")[1]
@@ -176,25 +183,16 @@ const endpointAgeMs = existsSync(endpointFile) ? Date.now() - statSync(endpointF
 const picked = pickTargetSession(endpoint);
 const ageSeconds = Math.round(endpointAgeMs / 1000);
 say(`published sessions : ${JSON.stringify(published)}`);
-say(`endpoint refreshed : ${ageSeconds}s ago (${new Date(Date.now() - endpointAgeMs).toISOString()})`);
-
-// A delivery is only attempted into a *running* session, so a stale publication means the
-// target cannot be confirmed and the run would produce a meaningless D3.
-if (picked.how !== "stated with --target-session" && endpointAgeMs > 120_000) {
-	say("");
-	say(`FATAL: the harness has not republished its live sessions for ${ageSeconds}s, so none of the`);
-	say("       published sessions can be confirmed as running, and a delivery to a stopped");
-	say("       session would wait forever — that is the documented idle boundary, not a bug.");
-	say("");
-	say("       Fix: keep a DSH session running (send it a message so it is mid-turn), or state");
-	say("       the target explicitly, e.g.");
-	say("         node examples/live/claude-acceptance.mjs --target-session <sessionId>");
-	process.exit(2);
-}
+// Reported, never judged on: the receiver writes this file only when the live session set
+// changes, so its age says nothing about whether the session is still running. An earlier
+// version refused to start here and blocked a perfectly valid run.
+say(`endpoint record    : last rewritten ${ageSeconds}s ago (informational; not a liveness signal)`);
 
 const targetSession = picked.session;
-// Prove a model is reachable before spending six steps on it.
-requireUsableClaude();
+// Say up front whether a model is reachable, so a missing credential is never read as six
+// adapter failures. It warns rather than exits: this process may lack the session's
+// credential even when the shell it was started from can run claude perfectly well.
+reportClaudeAvailability();
 // The DSH session that must NOT receive anything: any other published session, else a fake
 // endpoint registered for this run so the isolation check still has a second target.
 let decoySession = published.find((id) => id !== targetSession) ?? "decoy-session-not-live";
@@ -265,8 +263,16 @@ const outboundAcked = await waitUntil(
 record(
 	"D3 Claude → real DSH session delivery",
 	outboundAcked && outboundDelivery?.target?.sessionId === targetSession,
-	`messageId=${outbound?.messageId ?? "none"} deliveryId=${outboundDelivery?.deliveryId ?? "none"} target=${JSON.stringify(outboundDelivery?.target ?? null)} state=${outboundDelivery ? core.getDelivery(bridge, outboundDelivery.deliveryId)?.state : "none"}`,
-	"the receiver claimed, steered and acked it for the bound session"
+	[
+		`messageId=${outbound?.messageId ?? "none"}`,
+		`deliveryId=${outboundDelivery?.deliveryId ?? "none"}`,
+		`target=${JSON.stringify(outboundDelivery?.target ?? null)}`,
+		`state=${outboundDelivery ? core.getDelivery(bridge, outboundDelivery.deliveryId)?.state : "none"}`,
+		outboundAcked ? "" : "the target was not accepting work during this run (stopped or idle) — the message is queued, not lost"
+	].filter(Boolean).join(" "),
+	outboundAcked
+		? "the receiver claimed, steered and acked it for the bound session"
+		: "delivery did not happen: keep the target DSH session running while this script runs (send it a message so it is mid-turn), or pass --target-session"
 );
 
 // --- D4: a waiting message is surfaced on Claude's next lifecycle event ---------
