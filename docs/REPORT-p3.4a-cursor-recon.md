@@ -1,6 +1,6 @@
 # P3.4-A reconnaissance — Cursor capabilities
 
-Date: 2026-10-06 · Cursor **2.5.25** (`H:\PersonalComputerSoftware\cursor`) · Windows.
+Date: 2026-10-06 · Cursor **2.5.25** (`<CURSOR_INSTALL>`) · Windows.
 Evidence is from this machine: Cursor's own bundles, its shipped extensions, its on-disk
 configuration, and Claude Code's behaviour on the same manifest. Documentation was not used
 as evidence.

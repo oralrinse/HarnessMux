@@ -77,7 +77,7 @@ running DeepSeek Harness session on a real machine.
 | **Codex** | ✅ | ✅ | ✅ injected at `SessionStart` / `UserPromptSubmit` | adapter: manifest, `.mcp.json`, pointer file, user-level hooks (hooks need trust) | ✅ [REPORT-p3.2](REPORT-p3.2-codex-adapter.md) |
 | **Claude Code** | ✅ | ✅ | ✅ injected via `hookSpecificOutput.additionalContext` | adapter: plugin ships `.mcp.json`, `hooks/hooks.json`, skill; `${CLAUDE_PLUGIN_ROOT}`; no trust step | ✅ [REPORT-p3.3c](REPORT-p3.3c-claude-acceptance.md) |
 | **Cursor** | expected ✅ | expected ✅ | **pull** (expected) | plugin: reuses the Claude-shaped manifest; MCP must be declared as `"mcpServers": "./.mcp.json"` | ⏳ [reconnaissance done](REPORT-p3.4a-cursor-recon.md), live run blocked |
-| **VS Code / GitHub Copilot** | untested | untested | untested | planned, P3.4-B | ⏳ |
+| **VS Code / GitHub Copilot** | not tested | not tested | not tested | planned, P3.4-B | ⛔ **the client is not installed on this machine** ([REPORT-p3.4b](REPORT-p3.4b-copilot-recon.md)); a Copilot sign-in is needed before the row can move |
 | **Generic MCP client** | ✅ by construction | — | pull only | the MCP server over stdio; no plugin needed | ⏳ smoke test |
 
 Two axes matter and they are independent: whether a client can **send** (any MCP client can,
