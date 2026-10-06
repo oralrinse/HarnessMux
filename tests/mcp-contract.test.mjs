@@ -17,11 +17,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handle, PROTOCOL_VERSION, SERVER_INFO, TOOLS } from "../packages/mcp/server.mjs";
 import * as core from "../packages/core/core-v2.mjs";
 
 const ROOT = mkdtempSync(join(tmpdir(), "hxmux-mcp-"));
 process.env.HARNESSMUX_DIR = ROOT;
+// The server reads its actor at load time, and otherwise falls back to an installed
+// client adapter's recorded identity (`~/.codex/harnessmux.json`). Pin it before the
+// import so this suite cannot depend on the state of the machine it runs on.
+process.env.HARNESSMUX_ACTOR = "client";
+const { handle, PROTOCOL_VERSION, SERVER_INFO, TOOLS } = await import("../packages/mcp/server.mjs");
 core.ensureBridge(ROOT, { remember: false });
 
 /** Call a JSON-RPC method and assert the envelope. */
@@ -177,6 +181,44 @@ let sent;
 	assert.equal(core.getMessage(ROOT, reply.structuredContent.messageId).kind, "answer", "a reply defaults to kind answer");
 	assert.equal(core.getMessage(ROOT, reply.structuredContent.messageId).replyTo, sent.structuredContent.messageId, "the reply references its parent");
 	assert.equal(core.getMessage(ROOT, reply.structuredContent.messageId).threadId, sent.structuredContent.threadId, "the reply stays on the thread");
+	// The thread is bound, so the binding decides — not the parent's own routing.
+	assert.equal(reply.structuredContent.target.endpointId, "dsh-endpoint", "a bound thread routes the reply through its binding");
+	assert.equal(reply.structuredContent.mode, "delegated", "the reply inherits the binding's mode");
+}
+
+// --- 6b. a reply follows its parent's route when no binding exists ---------------
+// This is the conversation Codex actually has with a session: an explicitly addressed
+// message with no thread binding. Without this, the second turn of that conversation
+// silently became unrouted and the peer never heard back.
+{
+	const parent = tool("send_message", {
+		body: "explicitly addressed, never bound",
+		topic: "reply routing",
+		endpoint_id: "dsh-endpoint",
+		session_id: "session-live",
+		mode: "delegated"
+	});
+	assert.equal(parent.structuredContent.target.sessionId, "session-live", "the parent carries an explicit target");
+	assert.equal(core.listBindings(ROOT).some((entry) => entry.threadId === parent.structuredContent.threadId), false, "and the thread stays unbound");
+
+	const reply = tool("reply_message", { message_id: parent.structuredContent.messageId, body: "answering without a binding" });
+	assert.notEqual(reply.structuredContent.target, null, "the reply is routed, not left unrouted");
+	assert.equal(reply.structuredContent.target.endpointId, "dsh-endpoint", "it reuses the parent's endpoint");
+	assert.equal(reply.structuredContent.target.sessionId, "session-live", "it reuses the parent's session");
+	assert.equal(reply.structuredContent.mode, "delegated", "and the parent's trust mode");
+	assert.match(reply.content[0].text, /target=dsh@dsh-endpoint#session-live/u, "the model is told where it went");
+
+	// A binding still outranks the parent's route once one exists.
+	tool("bind_thread", { thread_id: parent.structuredContent.threadId, endpoint_id: "dsh-endpoint", session_id: "session-other", mode: "advisory" });
+	const afterBinding = tool("reply_message", { message_id: parent.structuredContent.messageId, body: "now bound elsewhere" });
+	assert.equal(afterBinding.structuredContent.target.sessionId, "session-other", "the binding wins over the inherited route");
+	assert.equal(afterBinding.structuredContent.mode, "advisory", "and its mode wins too");
+
+	// A reply whose parent was never routed anywhere stays unrouted rather than guessing.
+	const orphan = tool("send_message", { body: "nobody addressed", topic: "orphan reply" });
+	const orphanReply = tool("reply_message", { message_id: orphan.structuredContent.messageId, body: "no route to inherit" });
+	assert.equal(orphanReply.structuredContent.target, null, "with no binding and no parent route, the reply waits unrouted");
+	assert.match(orphanReply.content[0].text, /UNROUTED/u, "and says so plainly");
 }
 
 // --- 7. tool-level failures are content, not transport errors -------------------

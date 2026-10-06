@@ -74,7 +74,7 @@ Honest boundaries — read these before deploying:
 |---|---|
 | **No idle wake** | Delivery happens while the session is running. An idle session is not woken; the delivery waits. *Running session → near-real-time; idle session → next time it runs.* |
 | **Not exactly-once** | The transport is at-least-once by design. Consumers tolerate duplicate delivery ids. |
-| **Clients other than Codex** | **Planned**, not supported yet (P3.3/P3.4). Each will be listed here only after it is verified the way Codex was. |
+| **Clients other than Codex** | **Planned**, not supported yet (P3.3/P3.4). Codex is verified (see *Connect a client*); each other client is listed only after it is verified the same way. |
 | **One receiver** | DeepSeek Harness is the only receiver implemented. The receiver interface is specified, not built ([receiver-api.md](docs/receiver-api.md)). |
 
 ## Quick start
@@ -150,13 +150,34 @@ call the same protocol-v2 core, so no client can observe a different meaning of 
 delivery, lease or binding. Their contract (names, schemas, error semantics, and
 behaviour against the same v2 state) is pinned by `tests/mcp-contract.test.mjs`.
 
-**Codex** — `packages/adapter-codex/` ships the Codex manifest, a skill and an opt-in
-hook template, plus a local marketplace:
+**Codex** — the adapter is a manifest, a `.mcp.json`, one skill and two hooks. The
+installer writes everything Codex needs outside its own plugin cache:
 
 ```sh
-codex plugin marketplace add <path to this repo>
+node scripts/install.mjs --codex          # pointer file, skill, lifecycle hooks
+codex plugin marketplace add <this repo>
 codex plugin add harnessmux@harnessmux
 ```
+
+Verified against Codex CLI 0.154.0 on a real machine: Codex listed the eight MCP tools,
+called `get_status` and `send_message` through them, a `delegated` message was delivered
+into a running DeepSeek Harness session, and the lifecycle hook put the harness's reply
+into Codex's context on the next turn.
+
+Two things worth knowing, both found by running it rather than by reading about it:
+
+- **Hooks need trust.** Codex will not run a newly written hook until it is trusted; in a
+  non-interactive run that appears as `hook: SessionStart Failed`. Approve it once in an
+  interactive session, or pass `--dangerously-bypass-hook-trust` when you have vetted the
+  command yourself.
+- **`plugin_hooks` is removed in 0.154.0.** Hooks shipped inside a plugin are ignored, so
+  the installer writes them into `~/.codex/hooks.json` instead, with **absolute** paths:
+  Codex resolves a hook command against `~/.codex`, not against the plugin root, and a
+  relative command there fails with `Cannot find module`.
+
+The pick-up hook is a *pull*: it lists what is waiting and never consumes it, so an idle
+Codex is not woken — it simply loses nothing. `node scripts/install.mjs --codex --uninstall`
+removes exactly what the installer added and leaves your own hooks untouched.
 
 **Claude Code, Cursor, VS Code / Copilot** — planned adapters (P3.3/P3.4). They reuse
 the same MCP tools, so the work is a manifest plus a thin adapter, not another client
@@ -173,7 +194,7 @@ packages/core/           protocol v1 + v2 + migration (platform-independent, no 
 packages/cli/            the harnessmux CLIs (send/reply/deliver/inbox/claim/ack/verify/…)
 packages/mcp/            the shared MCP tool layer every client uses
 packages/portable-plugin/ shared client assets: skill, MCP registration, path resolution
-packages/adapter-codex/  the Codex client plugin (manifest, skill, hook template)
+packages/adapter-codex/  the Codex adapter (manifest, .mcp.json, launcher, hooks)
 packages/receiver-dsh/   the DeepSeek Harness **receiver** (tool + briefing + pump)
 docs/positioning.md      what the project is, and what it deliberately does not claim
 docs/roadmap.md          phases, the planned repo layout, and the open decisions

@@ -150,14 +150,197 @@ const MANUAL = `Manual setup (equivalent to what this script does):
      (then restart the DSH app / relaunch \`dsh web\`)
 `;
 
-if (options["print-only"] === true) {
+if (!existsSync(dir)) {
+	process.stderr.write(`harnessmux: no DSH profile at ${dir}\nCreate it first (run the harness once), or pass --dsh-profile <name>.\n`);
+	process.exit(1);
+}
+
+/** This machine's Codex home (`CODEX_HOME` wins, then `~/.codex`). */
+function codexHome() {
+	return process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+}
+
+/** Paths the Codex adapter owns, so uninstall removes exactly what install created. */
+function codexPaths() {
+	const home = codexHome();
+	return {
+		home,
+		pointer: join(home, "harnessmux.json"),
+		skill: join(home, "skills", "harnessmux", "SKILL.md"),
+		hooks: join(home, "hooks.json"),
+		pluginDir: join(REPO_ROOT, "packages", "adapter-codex")
+	};
+}
+
+/**
+ * The hook entries this adapter owns inside `~/.codex/hooks.json`.
+ *
+ * The command must be an **absolute** path. Codex resolves a hook command against the
+ * directory holding the hooks file (`~/.codex`), not against the plugin or the project,
+ * so the relative form `node ./scripts/pending.mjs` that the plugin's own `hooks.json`
+ * uses fails there with `Cannot find module` — observed as `hook: SessionStart Failed`.
+ * The plugin's copy stays relative (that file lives next to the script); the installed
+ * one is absolute because it does not.
+ *
+ * Kept as data so install and uninstall cannot drift apart.
+ */
+function codexHooks() {
+	const script = join(REPO_ROOT, "packages", "adapter-codex", "scripts", "pending.mjs");
+	const command = `node "${script}" --actor codex`;
+	return { SessionStart: command, UserPromptSubmit: command };
+}
+
+/** Whether a hook entry was written by this adapter. */
+function isOurHook(hook) {
+	if (typeof hook?.command !== "string") return false;
+	return hook.command.includes("harnessmux") && hook.command.includes("pending.mjs") && hook.command.includes("--actor codex");
+}
+
+/**
+ * Install, upgrade or remove the Codex side of HarnessMux.
+ *
+ * Owns three things and touches nothing else:
+ *   1. `~/.codex/harnessmux.json` — where this checkout is, so the plugin's launcher can
+ *      find the MCP server even after Codex copies the plugin into its own cache;
+ *   2. `~/.codex/skills/harnessmux/SKILL.md` — a copy of the one shared skill. A copy on
+ *      purpose: the source of truth stays in `packages/portable-plugin`, and re-running
+ *      the installer is what refreshes it, so the two cannot drift silently;
+ *   3. `~/.codex/hooks.json` — the two lifecycle hooks, merged into whatever is already
+ *      there, and removed by exact ownership on uninstall.
+ *
+ * @returns {Promise<void>} resolves when the change is applied or reported.
+ */
+async function installCodexAdapter() {
+	const paths = codexPaths();
+	const remove = options.uninstall === true;
+	const skillSource = join(REPO_ROOT, "packages", "portable-plugin", "skills", "harnessmux", "SKILL.md");
+
+	if (remove) {
+		process.stdout.write("harnessmux: removing the Codex adapter\n");
+		if (existsSync(paths.pointer)) {
+			if (!dryRun) rmSync(paths.pointer, { force: true });
+			process.stdout.write(`${dryRun ? "[dry-run] " : ""}removed ${paths.pointer}\n`);
+		}
+		if (existsSync(paths.skill)) {
+			if (!dryRun) rmSync(dirname(paths.skill), { recursive: true, force: true });
+			process.stdout.write(`${dryRun ? "[dry-run] " : ""}removed ${dirname(paths.skill)}\n`);
+		}
+		if (existsSync(paths.hooks)) {
+			const current = JSON.parse(readFileSync(paths.hooks, "utf8"));
+			let removed = 0;
+			for (const event of Object.keys(current.hooks ?? {})) {
+				const groups = current.hooks[event];
+				if (!Array.isArray(groups)) continue;
+				const kept = [];
+				for (const group of groups) {
+					const hooks = (group.hooks ?? []).filter((hook) => {
+						if (!isOurHook(hook)) return true;
+						removed += 1;
+						return false;
+					});
+					if (hooks.length > 0) kept.push({ ...group, hooks });
+				}
+				if (kept.length > 0) current.hooks[event] = kept;
+				else delete current.hooks[event];
+			}
+			if (removed > 0) {
+				if (Object.keys(current.hooks ?? {}).length === 0) {
+					// Only ever removed when we are the ones who emptied it.
+					if (!dryRun) rmSync(paths.hooks, { force: true });
+					process.stdout.write(`${dryRun ? "[dry-run] " : ""}removed ${removed} harnessmux hook(s) and the now-empty ${paths.hooks}\n`);
+				} else {
+					if (!dryRun) {
+						backup(paths.hooks);
+						writeFileSync(paths.hooks, `${JSON.stringify(current, null, 2)}\n`, "utf8");
+					}
+					process.stdout.write(`${dryRun ? "[dry-run] " : ""}removed ${removed} harnessmux hook(s), kept the user's own in ${paths.hooks}\n`);
+				}
+			} else {
+				process.stdout.write(`no harnessmux hooks present in ${paths.hooks}\n`);
+			}
+		}
+		process.stdout.write("\nCodex no longer has the HarnessMux MCP server, skill or hooks.\n");
+		return;
+	}
+
+	// 1. the pointer file: how an installed copy finds its server.
+	const pointer = {
+		checkout: REPO_ROOT,
+		mcpServer: join(REPO_ROOT, "packages", "mcp", "server.mjs"),
+		adapter: paths.pluginDir,
+		// Each adapter knows its own client identity, so the actor is stamped here rather
+		// than defaulted to a generic "client" in every message the client sends.
+		actor: "codex"
+	};
+	if (!dryRun) {
+		mkdirSync(paths.home, { recursive: true });
+		if (existsSync(paths.pointer)) backup(paths.pointer);
+		writeFileSync(paths.pointer, `${JSON.stringify(pointer, null, 2)}\n`, "utf8");
+	}
+	process.stdout.write(`${dryRun ? "[dry-run] " : ""}recorded the checkout in ${paths.pointer}\n`);
+
+	// 2. the skill: copied from the single shared source.
+	if (!existsSync(skillSource)) {
+		process.stderr.write(`harnessmux: the shared skill is missing at ${skillSource}\n`);
+		process.exit(1);
+	}
+	const skillText = readFileSync(skillSource, "utf8");
+	const skillChanged = !existsSync(paths.skill) || readFileSync(paths.skill, "utf8") !== skillText;
+	if (skillChanged && !dryRun) {
+		mkdirSync(dirname(paths.skill), { recursive: true });
+		writeFileSync(paths.skill, skillText, "utf8");
+	}
+	process.stdout.write(`${dryRun ? "[dry-run] " : ""}${skillChanged ? "installed" : "already current"}: ${paths.skill}\n`);
+
+	// 3. the lifecycle hooks, merged rather than overwritten.
+	let hooksDoc = { hooks: {} };
+	if (existsSync(paths.hooks)) {
+		try {
+			hooksDoc = JSON.parse(readFileSync(paths.hooks, "utf8"));
+			hooksDoc.hooks ??= {};
+		} catch (error) {
+			process.stderr.write(`harnessmux: ${paths.hooks} is not valid JSON (${String(error?.message ?? error)}).\nRefusing to overwrite it; move it aside first.\n`);
+			process.exit(1);
+		}
+	}
+	let hooksChanged = 0;
+	for (const [event, command] of Object.entries(codexHooks())) {
+		hooksDoc.hooks[event] ??= [];
+		const present = hooksDoc.hooks[event].some((group) => (group.hooks ?? []).some((hook) => hook?.command === command));
+		if (present) continue;
+		hooksChanged += 1;
+		hooksDoc.hooks[event].push({ hooks: [{ type: "command", command, timeoutSec: 20 }] });
+	}
+	if (hooksChanged > 0 && !dryRun) {
+		if (existsSync(paths.hooks)) backup(paths.hooks);
+		writeFileSync(paths.hooks, `${JSON.stringify(hooksDoc, null, 2)}\n`, "utf8");
+	}
+	process.stdout.write(`${dryRun ? "[dry-run] " : ""}${hooksChanged > 0 ? `added ${hooksChanged} hook(s)` : "hooks already installed"}: ${paths.hooks}\n`);
+
+	process.stdout.write([
+		"",
+		"Next, in Codex:",
+		"  1. add this repository as a local marketplace and install the plugin:",
+		`       codex plugin marketplace add "${REPO_ROOT}"`,
+		"       codex plugin add harnessmux@harnessmux",
+		"  2. start a new session; HarnessMux appears as an MCP server with the mailbox tools.",
+		"",
+		"Verify from a session: ask Codex to call `get_status`, or inspect the roster directly.",
+		""
+	].join("\n"));
+}
+
+// --- dispatch -------------------------------------------------------------------
+// Kept after every declaration: each branch below runs at module top level, so a
+// `const` declared later in the file would still be in its temporal dead zone here.
+if (options["print-only"] === true && options.codex !== true) {
 	process.stdout.write(MANUAL);
 	process.exit(0);
 }
 
-if (!existsSync(dir)) {
-	process.stderr.write(`harnessmux: no DSH profile at ${dir}\nCreate it first (run the harness once), or pass --dsh-profile <name>.\n`);
-	process.exit(1);
+if (options.codex === true) {
+	await installCodexAdapter();
+	process.exit(0);
 }
 
 // 1. mailbox

@@ -157,7 +157,7 @@ packages/core/            协议 v1 + v2 + 迁移（平台无关，零依赖）
 packages/cli/             harnessmux CLI（send/reply/deliver/inbox/claim/ack/verify/…）
 packages/mcp/             所有客户端共用的 MCP 工具层
 packages/portable-plugin/ 共享客户端资产：skill、MCP 注册模板、路径解析
-packages/adapter-codex/   Codex 客户端插件（清单、skill、钩子模板）
+packages/adapter-codex/   Codex adapter（清单、.mcp.json、启动器、hooks）
 packages/receiver-dsh/    DeepSeek Harness **receiver**（工具 + 简报 + 投递 pump）
 docs/positioning.md       项目是什么、以及刻意不声称什么
 docs/roadmap.md           阶段、规划中的仓库结构、未决决策

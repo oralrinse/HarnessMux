@@ -43,8 +43,8 @@ client is explicitly rejected.
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| **P3.1** | **Portable core**: shared MCP tool layer, mailbox skill, MCP registration, packaging notes | ✅ **MCP server built and contract-tested** (`packages/mcp/`), shared assets in `packages/portable-plugin/`; the Codex adapter is not yet wired to it |
-| **P3.2** | **Codex adapter**: wire the shared MCP server, Codex-specific hooks (lifecycle polling), packaging, install/distribution | ⏳ next |
+| **P3.1** | **Portable core**: shared MCP tool layer, mailbox skill, MCP registration, packaging notes | ✅ MCP server built and contract-tested (`packages/mcp/`), shared assets in `packages/portable-plugin/` |
+| **P3.2** | **Codex adapter**: the shared MCP server, lifecycle hooks, packaging, install/uninstall | ✅ **verified on a real machine** — Codex 0.154.0 listed the eight tools, called them, and a `delegated` message reached a running DSH session; see [REPORT-p3.2](REPORT-p3.2-codex-adapter.md) for C1–C8 and the two hook-transport defects it uncovered |
 | **P3.3** | **Claude Code adapter**: Claude plugin manifest, its hooks, reusing the shared MCP tools | ⏳ |
 | **P3.4** | **Other clients**: Cursor, VS Code / GitHub Copilot, other MCP-capable or plugin-capable clients | ⏳ |
 | **P3.5** | **Compatibility matrix + CI** | ⏳ |

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "harnessmux": {
+      "command": "node",
+      "args": [
+        "./scripts/launch-mcp.mjs"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "HARNESSMUX_DIR",
+        "HARNESSMUX_ACTOR",
+        "HARNESSMUX_DEBUG",
+        "USERPROFILE",
+        "HOME",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "PATH",
+        "SystemRoot"
+      ],
+      "startup_timeout_sec": 15,
+      "tool_timeout_sec": 60
+    }
+  }
+}

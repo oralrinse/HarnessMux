@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/pending.mjs --actor codex",
+            "timeoutSec": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/pending.mjs --actor codex",
+            "timeoutSec": 20
+          }
+        ]
+      }
+    ]
+  }
+}

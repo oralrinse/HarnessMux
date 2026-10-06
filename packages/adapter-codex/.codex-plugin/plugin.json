@@ -1,40 +1,39 @@
 {
   "name": "harnessmux",
-  "version": "0.1.0",
-  "description": "Talk to a peer coding agent (DeepSeek Harness or any harnessmux participant) through a shared local mailbox: read its instructions, report results, and ask follow-up questions.",
+  "version": "0.2.0",
+  "description": "Control DeepSeek Harness from Codex: a durable mailbox with MCP tools, so work can be handed to an existing harness session and results come back on the same thread.",
   "author": {
-    "name": "harnessmux contributors"
+    "name": "HarnessMux contributors"
   },
-  "homepage": "https://github.com/harnessmux/harnessmux",
-  "repository": "https://github.com/harnessmux/harnessmux",
+  "homepage": "https://github.com/oralrinse/HarnessMux",
+  "repository": "https://github.com/oralrinse/HarnessMux",
   "license": "MIT",
   "keywords": [
-    "agent",
-    "agents",
-    "harnessmux",
+    "deepseek-harness",
+    "dsh",
+    "mcp",
     "mailbox",
+    "interop",
+    "agent",
     "multi-agent",
-    "delegate",
-    "orchestration",
-    "peer agent",
-    "deepseek harness",
-    "dsh"
+    "delegate"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "Agent Bridge",
-    "shortDescription": "Exchange instructions with a peer agent",
-    "longDescription": "Connect this Codex session to a peer coding agent running on the same machine (for example DeepSeek Harness) through a shared file mailbox. Read the peer's instructions, report progress and results back on the same thread, and ask follow-up questions. Use Agent Bridge when work is split between two agents, when another agent is waiting on your result, or when the user says another agent sent instructions.",
-    "developerName": "harnessmux",
-    "category": "Productivity",
+    "displayName": "HarnessMux",
+    "shortDescription": "Hand work to DeepSeek Harness from Codex",
+    "longDescription": "Connect this Codex session to DeepSeek Harness through HarnessMux. Messages are delivered durably to a harness session that is already open, results come back on the same thread, and the mailbox keeps a message when nothing is running instead of dropping it. Use HarnessMux when work belongs in the harness, when the harness is waiting on your result, or when the user says another agent sent instructions.",
+    "developerName": "HarnessMux",
+    "category": "Developer Tools",
     "capabilities": [
       "Write"
     ],
-    "websiteURL": "https://github.com/harnessmux/harnessmux",
+    "websiteURL": "https://github.com/oralrinse/HarnessMux",
     "defaultPrompt": [
-      "Check the agent bridge for new instructions",
-      "Report the test results to the peer agent",
-      "Ask the peer agent which approach it wants"
+      "Check HarnessMux for messages from the harness",
+      "Hand this task to DeepSeek Harness and report back",
+      "Ask the harness what it found"
     ]
   }
 }

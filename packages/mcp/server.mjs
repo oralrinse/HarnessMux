@@ -21,6 +21,7 @@
 
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import * as core from "../core/core-v2.mjs";
@@ -31,8 +32,25 @@ export const PROTOCOL_VERSION = "2024-11-05";
 /** Server identity reported in `initialize`. */
 export const SERVER_INFO = { name: "harnessmux", version: "0.1.0", title: "HarnessMux" };
 
-/** The actor this client speaks as when none was configured. */
-const DEFAULT_ACTOR = process.env.HARNESSMUX_ACTOR?.trim() || "client";
+/**
+ * The actor this client speaks as.
+ *
+ * `HARNESSMUX_ACTOR` wins. Otherwise the client adapter's installer records its own
+ * identity in `~/.codex/harnessmux.json`, so messages from Codex are attributed to
+ * `codex` instead of a meaningless `client` — which matters, because the receiver skips
+ * messages whose `from` is its own actor and a peer needs to see who is asking.
+ */
+const DEFAULT_ACTOR = (() => {
+	const configured = process.env.HARNESSMUX_ACTOR?.trim();
+	if (configured) return configured;
+	try {
+		const pointer = JSON.parse(readFileSync(join(homedir(), ".codex", "harnessmux.json"), "utf8"));
+		if (typeof pointer.actor === "string" && pointer.actor.trim()) return pointer.actor.trim();
+	} catch {
+		// No adapter pointer: a generic client is a fine default.
+	}
+	return "client";
+})();
 
 /** JSON-RPC error codes from the MCP specification. */
 const RPC = {
@@ -58,6 +76,39 @@ function renderMessage(message, delivery) {
 /** Human-readable target. */
 function targetLabel(target) {
 	return `${target.actor}${target.endpointId ? `@${target.endpointId}` : ""}${target.sessionId ? `#${target.sessionId}` : ""}`;
+}
+
+/**
+ * How a reply should be routed.
+ *
+ * A reply is meant to travel the way its parent travelled, and the parent's route is
+ * recorded on the *delivery*, not on the message: messages are immutable content and
+ * carry no target. Two sources are therefore available, and their precedence is the
+ * project's one non-negotiable rule:
+ *
+ *   1. **the thread binding** — an explicit human decision, and it always wins, even
+ *      when the parent happened to be routed somewhere else;
+ *   2. **the parent's delivery target** — reuse what actually worked, so a thread that
+ *      was never bound but was addressed explicitly stays a working conversation.
+ *
+ * With neither, the reply is enqueued unrouted and waits for a binding. Guessing a
+ * session, or broadcasting, is never an option.
+ *
+ * @param {string} bridge - bridge root.
+ * @param {object} parent - the message being answered.
+ * @returns {{target?: object, mode?: string}} routing intent, or `{}` to let the core decide.
+ */
+function replyRouting(bridge, parent) {
+	const binding = core.listBindings(bridge).find((entry) => entry.threadId === parent.threadId);
+	if (binding) return {}; // the core resolves the binding itself
+	for (const state of ["acked", "claimed", "queued"]) {
+		for (const delivery of core.listDeliveries(bridge, state)) {
+			if (delivery.messageId !== parent.messageId) continue;
+			if (delivery.target === null) continue;
+			return { target: delivery.target, mode: delivery.mode };
+		}
+	}
+	return {};
 }
 
 /**
@@ -153,13 +204,14 @@ export const TOOLS = [
 	{
 		name: "reply_message",
 		title: "Reply on a thread",
-		description: "Answer a specific message. The reply keeps the parent's thread and topic, and is delivered back to the parent's sender.",
+		description: "Answer a specific message. The reply keeps the parent's thread and topic and is routed the way the parent was: a thread binding wins when one exists, otherwise the routing the parent was actually delivered with is reused. With neither, the reply waits unrouted instead of guessing a session.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				message_id: { type: "string", description: "The message being answered." },
 				body: { type: "string", description: "Markdown body of the reply." },
-				kind: { type: "string", enum: ["answer", "report", "note"], description: "Defaults to answer." }
+				kind: { type: "string", enum: ["answer", "report", "note"], description: "Defaults to answer." },
+				mode: { type: "string", enum: ["advisory", "delegated"], description: "Trust mode for this reply; defaults to the mode the parent was delivered with." }
 			},
 			required: ["message_id", "body"],
 			additionalProperties: false
@@ -178,8 +230,16 @@ export const TOOLS = [
 				replyTo: parent.messageId,
 				body
 			});
-			const delivery = core.enqueueDelivery(bridge, { messageId: message.messageId });
-			return { text: `replied ${renderMessage(message, delivery)}`, structured: { messageId: message.messageId, deliveryId: delivery.deliveryId, target: delivery.target } };
+			const inherited = replyRouting(bridge, parent);
+			const delivery = core.enqueueDelivery(bridge, {
+				messageId: message.messageId,
+				...inherited,
+				...(args.mode === "advisory" || args.mode === "delegated" ? { mode: args.mode } : {})
+			});
+			return {
+				text: `replied ${renderMessage(message, delivery)}`,
+				structured: { messageId: message.messageId, deliveryId: delivery.deliveryId, target: delivery.target, mode: delivery.mode }
+			};
 		}
 	},
 	{
