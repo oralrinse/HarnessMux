@@ -79,6 +79,33 @@ function diagnose(line) {
 /** Where `diagnose()` writes, resolved from config or the environment. */
 let DEBUG_PATH = process.env.HARNESSMUX_DEBUG?.trim() ?? "";
 
+/**
+ * Last value written per change-key, so a steady state is recorded once.
+ *
+ * The trace exists for field debugging, and the pump runs every 10 seconds. Writing
+ * one line per tick made the log grow without bound while telling the reader nothing:
+ * a 196 KB file whose content was almost entirely `pump: skip agent status=idle`.
+ * State-driven logging keeps the diagnostic value — the transitions are exactly what
+ * one reads a trace for — and removes the repetition.
+ */
+const LAST_DIAGNOSED = new Map();
+
+/**
+ * Record a line only when the watched value changes.
+ *
+ * Use for anything that repeats while nothing happens (an idle agent, an unchanged
+ * queue, the same refusal). Use `diagnose()` for genuinely one-off events.
+ *
+ * @param {string} key - what is being watched, e.g. `agent-status:root`.
+ * @param {string} value - the current value; a repeat of the previous one is dropped.
+ * @param {string} line - the line to record when the value changed.
+ */
+function diagnoseOnChange(key, value, line) {
+	if (LAST_DIAGNOSED.get(key) === value) return;
+	LAST_DIAGNOSED.set(key, value);
+	diagnose(line);
+}
+
 /** This module's directory, used to reach the mailbox library. */
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -289,6 +316,12 @@ export function apply(ctx, config = {}) {
 	const crashAfterSteerPath = typeof config.crashAfterSteerSentinel === "string" ? config.crashAfterSteerSentinel.trim() : "";
 	// Diagnostics: this row's `debugLog` wins, so a running app can be traced by
 	// editing the profile patch instead of relaunching with an env var.
+	//
+	// Trace policy (kept deliberately narrow, see `diagnoseOnChange`): one line per
+	// startup, per shutdown, and per *change* of state — idle↔running, endpoint and
+	// session membership, claim, steer, ack, release, refusal and error. Steady states
+	// are recorded once instead of once per tick, so a trace left on for a day stays
+	// readable. File size limits and rotation belong to the release phase, not here.
 	if (typeof config.debugLog === "string" && config.debugLog.trim()) DEBUG_PATH = config.debugLog.trim();
 	diagnose(`apply: root=${root} endpointId=${endpointId} protocol=${protocolVersion} autoWake=${autoWake} agentsInjected=${ctx.agents !== undefined}`);
 	if (protocolVersion === "v1" && !mailboxV1?.isBridgeRoot(root)) {
@@ -611,9 +644,15 @@ export function apply(ctx, config = {}) {
 	 */
 	function pumpV2(agent) {
 		if (!agent || agent.status !== "running" || typeof agent.steer !== "function") {
-			diagnose(`pump: skip agent status=${agent?.status} steer=${typeof agent?.steer}`);
+			// Fires on every tick, so it is recorded only when the state changes:
+			// idle ↔ running, or the steer capability appearing/disappearing. A running
+			// agent clears the key (below) so the next idle period logs its own
+			// transition instead of being suppressed forever.
+			const state = `${agent?.status ?? "none"}|steer=${typeof agent?.steer}`;
+			diagnoseOnChange(`agent-state:${root}`, state, `pump: skip agent status=${agent?.status} steer=${typeof agent?.steer}`);
 			return;
 		}
+		LAST_DIAGNOSED.delete(`agent-state:${root}`);
 		const sessionId = agent.session?.header?.id;
 		let queued = [];
 		try {
@@ -623,34 +662,48 @@ export function apply(ctx, config = {}) {
 			ctx.logger?.warn?.(`[harnessmux] v2 discovery failed: ${String(error)}`);
 			return;
 		}
-		diagnose(`pump: sessionId=${sessionId} queued=${queued.length} targets=${JSON.stringify(queued.map((d) => d.target))}`);
+		// The queue is only interesting when its shape changes; the per-delivery lines
+		// below carry the detail for anything that moves.
+		diagnoseOnChange(
+			`pump-summary:${root}::${sessionId ?? "root"}`,
+			JSON.stringify(queued.map((d) => d.target)),
+			`pump: sessionId=${sessionId} queued=${queued.length} targets=${JSON.stringify(queued.map((d) => d.target))}`
+		);
 		const now = Date.now();
 		for (const delivery of queued) {
 			const target = delivery.target;
 			// Unrouted deliveries wait for an explicit binding; never guess a session.
+			// These per-delivery lines are also change-driven: a delivery that sits
+			// unrouted for hours is one fact, not one fact per tick.
 			if (target === null) {
-				diagnose(`pump: skip ${delivery.deliveryId} unrouted (awaiting binding)`);
+				diagnoseOnChange(`skip:${delivery.deliveryId}`, "unrouted", `pump: skip ${delivery.deliveryId} unrouted (awaiting binding)`);
 				continue;
 			}
 			if (target.endpointId !== endpointId) {
-				diagnose(`pump: skip ${delivery.deliveryId} endpoint ${target.endpointId} != ${endpointId}`);
+				diagnoseOnChange(`skip:${delivery.deliveryId}`, `endpoint:${target.endpointId}`, `pump: skip ${delivery.deliveryId} endpoint ${target.endpointId} != ${endpointId}`);
 				continue;
 			}
 			if (target.sessionId !== undefined && sessionId !== undefined && target.sessionId !== sessionId) {
-				diagnose(`pump: skip ${delivery.deliveryId} session ${target.sessionId} != ${sessionId}`);
+				diagnoseOnChange(`skip:${delivery.deliveryId}`, `session:${target.sessionId}`, `pump: skip ${delivery.deliveryId} session ${target.sessionId} != ${sessionId}`);
 				continue;
 			}
+			// The backoff deadline shrinks every tick, so the remaining time is bucketed
+			// to whole seconds: one line per second of waiting, not ten.
 			const notBefore = retryAfter.get(backoffKey(delivery.deliveryId)) ?? 0;
 			if (notBefore > now) {
-				diagnose(`pump: skip ${delivery.deliveryId} backoff for ${notBefore - now}ms`);
+				const secondsLeft = Math.ceil((notBefore - now) / 1000);
+				diagnoseOnChange(`backoff:${delivery.deliveryId}`, String(secondsLeft), `pump: skip ${delivery.deliveryId} backoff for ~${secondsLeft}s`);
 				continue;
 			}
 			const owner = `${endpointId}:${sessionId ?? "root"}`;
 			const claim = mailboxV2.claimDelivery(root, delivery.deliveryId, { owner, leaseMs: config.leaseMs });
 			if (!claim.claimed) {
-				diagnose(`pump: claim ${delivery.deliveryId} refused reason=${claim.reason}`);
+				diagnoseOnChange(`claim-refused:${delivery.deliveryId}`, String(claim.reason), `pump: claim ${delivery.deliveryId} refused reason=${claim.reason}`);
 				continue;
 			}
+			LAST_DIAGNOSED.delete(`skip:${delivery.deliveryId}`);
+			LAST_DIAGNOSED.delete(`claim-refused:${delivery.deliveryId}`);
+			LAST_DIAGNOSED.delete(`backoff:${delivery.deliveryId}`);
 			diagnose(`pump: claimed ${delivery.deliveryId} attempt=${claim.claim.attempt}`);
 			const message = mailboxV2.getMessage(root, claim.claim.messageId);
 			if (!message) {
@@ -682,7 +735,10 @@ export function apply(ctx, config = {}) {
 			} catch (error) {
 				// Hand-off failed: back to the queue with a growing backoff.
 				mailboxV2.releaseDelivery(root, delivery.deliveryId, { reason: "steer-failed" });
-				retryAfter.set(backoffKey(delivery.deliveryId), now + Math.min(RETRY_BASE_MS * Math.max(1, claim.claim.attempt), RETRY_MAX_MS));
+				const waitMs = Math.min(RETRY_BASE_MS * Math.max(1, claim.claim.attempt), RETRY_MAX_MS);
+				retryAfter.set(backoffKey(delivery.deliveryId), now + waitMs);
+				LAST_DIAGNOSED.delete(`backoff:${delivery.deliveryId}`);
+				diagnose(`pump: released ${delivery.deliveryId} reason=steer-failed retryIn=${waitMs}ms`);
 				ctx.logger?.warn?.(`[harnessmux] could not steer delivery ${delivery.deliveryId}: ${String(error)}`);
 			}
 		}
@@ -724,6 +780,13 @@ export function apply(ctx, config = {}) {
 			ctx.effect?.(() => () => {
 				clearInterval(timer);
 				ACTIVE_WATCHERS.delete(watcherKey);
+				// Clear the change-memory with the watcher: a remount must be able to
+				// record its own first observation rather than inheriting the previous
+				// mount's last value and staying silent.
+				for (const key of [...LAST_DIAGNOSED.keys()]) {
+					if (key.endsWith(root) || key.includes(`:${root}::`) || key.includes(`:${root}`)) LAST_DIAGNOSED.delete(key);
+				}
+				diagnose(`dispose: root=${root} endpointId=${endpointId} watcher stopped`);
 			}, "harnessmux: stop the mailbox watcher");
 		}
 	}
