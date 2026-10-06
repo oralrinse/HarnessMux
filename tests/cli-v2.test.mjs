@@ -128,5 +128,39 @@ assert.equal(status.messages, 3, "three immutable messages: unbound, bound, and 
 assert.equal(status.acked, 1);
 assert.equal(status.bindings, 1, "one thread binding");
 
+// --- the CLI must never move the user's remembered root ------------------------
+// `init --root <tempdir>` is how every probe and test builds a throwaway bridge. It used
+// to write that directory into the shared root cache, and the damage only appeared later:
+// the next plain CLI call resolved a root that had since been deleted, which is exactly
+// how the P3.3-C acceptance run failed with "no bridge root at …\Temp\…".
+{
+	const { ROOT_CACHE } = await import("../packages/core/core-v2.mjs");
+	const { existsSync, mkdtempSync, readFileSync, writeFileSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const original = existsSync(ROOT_CACHE) ? readFileSync(ROOT_CACHE, "utf8") : null;
+	const sentinel = mkdtempSync(join(tmpdir(), "hxmux-cli-cache-"));
+	const ephemeral = join(tmpdir(), `hxmux-cli-init-${Date.now().toString(36)}`);
+	try {
+		writeFileSync(ROOT_CACHE, sentinel, "utf8");
+		// Run the CLI exactly as a probe does, with `--root` supplied by the caller: the
+		// shared `cli()` helper would inject a second `--root` and the parser would bail.
+		execFileSync(process.execPath, [CLI, "init", "--root", ephemeral], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(readFileSync(ROOT_CACHE, "utf8"), sentinel, "init outside the checkout does not move the remembered root");
+		// The guard is on the write itself, so a caller that forgets the opt-out cannot
+		// reintroduce the bug either.
+		const core = await import("../packages/core/core-v2.mjs");
+		assert.equal(core.rememberRoot(ephemeral), true, "a real root is still remembered when asked for");
+		assert.equal(readFileSync(ROOT_CACHE, "utf8"), ephemeral, "and the cache follows the explicit request");
+		assert.equal(core.rememberRoot(join(import.meta.dirname, "test-bridge-cache-guard")), false, "an in-checkout root is refused by the write site");
+		assert.equal(readFileSync(ROOT_CACHE, "utf8"), ephemeral, "the refusal leaves the cache alone");
+	} finally {
+		if (original === null) rmSync(ROOT_CACHE, { force: true });
+		else writeFileSync(ROOT_CACHE, original, "utf8");
+		rmSync(sentinel, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+		rmSync(ephemeral, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+		rmSync(join(import.meta.dirname, "test-bridge-cache-guard"), { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
 rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 console.log("cli-v2.test.mjs: all assertions passed");

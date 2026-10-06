@@ -140,11 +140,16 @@ function renderMessage(message) {
 
 const COMMANDS = {
 	init(root, { options }) {
-		emit(ensureBridge(root), options, `harnessmux v2 ready at ${root}`);
+		// Creating a bridge must never move the user's remembered root: `init --root
+		// <tempdir>` is exactly how the test suites and the live probes build throwaway
+		// bridges. Leaving the flag off here repointed the cache at a directory that was
+		// then deleted, and the next plain CLI call failed with "no bridge root at
+		// …\Temp\…" — which is how it was found, by the P3.3-C acceptance run.
+		emit(ensureBridge(root, { remember: false }), options, `harnessmux v2 ready at ${root}`);
 	},
 
 	root(root, { options }) {
-		ensureBridge(root);
+		ensureBridge(root, { remember: false });
 		emit({ root }, options, root);
 	},
 

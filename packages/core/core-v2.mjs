@@ -160,8 +160,20 @@ export function writeManifest(root, patch) {
 	return next;
 }
 
-/** Remember a root for later invocations without `--root`. */
+/**
+ * Remember a root for later invocations without `--root`.
+ *
+ * The ephemeral-root check lives here as well as in `ensureBridge`, because this is the
+ * one function that writes the cache. A caller that forgets `{ remember: false }` — the
+ * CLI's own `init` did — could otherwise point every later invocation at a throwaway
+ * directory, and the damage only surfaces once that directory is gone. Keeping the guard
+ * at the write site makes that impossible regardless of the caller.
+ *
+ * @param {string} root - the bridge root to remember.
+ * @returns {boolean} whether the cache was written.
+ */
 export function rememberRoot(root) {
+	if (isEphemeralRoot(root)) return false;
 	try {
 		mkdirSync(join(homedir(), ".dsh"), { recursive: true });
 		writeFileSync(ROOT_CACHE, root, "utf8");

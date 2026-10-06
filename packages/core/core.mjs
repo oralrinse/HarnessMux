@@ -72,8 +72,18 @@ export function resolveBridgeRoot(explicit) {
 	return resolve(join(home, "harnessmux"));
 }
 
-/** Remember a root so later invocations without `--root` find it again. */
+/**
+ * Remember a root so later invocations without `--root` find it again.
+ *
+ * Refuses an ephemeral root for the same reason as the v2 core: this is the single write
+ * site, so a caller that forgets to opt out cannot point every later invocation at a
+ * throwaway directory that is about to be deleted.
+ *
+ * @param {string} root - the bridge root to remember.
+ * @returns {boolean} whether the cache was written.
+ */
 export function rememberRoot(root) {
+	if (isEphemeralRoot(root)) return false;
 	try {
 		const dir = dirname(ROOT_CACHE);
 		mkdirSync(dir, { recursive: true });
