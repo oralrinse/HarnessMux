@@ -44,8 +44,15 @@ Generic MCP      ┘         thin adapters)              mailbox)         (live 
 - **One direction is committed: many clients → DeepSeek Harness.**
 - DeepSeek Harness is the only **receiver** implemented and validated on a real
   machine, with a real model, end to end.
-- Codex is the **first** client, not the architectural center.
-- The client layer is shared; platform differences live in thin adapters.
+- **Two clients carry that same evidence: Codex and Claude Code.** Each was driven
+  against a running harness session through the shared MCP layer — discovery, a real
+  tool call, a delivery the receiver acknowledged, pickup at the client's next
+  lifecycle event, thread/reply correctness, and no cross-talk between sessions. See
+  [REPORT-p3.2](REPORT-p3.2-codex-adapter.md) and
+  [REPORT-p3.3c](REPORT-p3.3c-claude-acceptance.md).
+- The client layer is shared; platform differences live in thin adapters. The two
+  adapters differ only where the hosts differ — Codex needed a pointer file and
+  absolute hook paths, Claude needed neither — and neither contains mailbox logic.
 
 ## 3. What is explicitly *not* promised yet
 
@@ -56,7 +63,7 @@ Generic MCP      ┘         thin adapters)              mailbox)         (live 
   not a TODO.
 - **Exactly-once.** The transport is at-least-once, and the crash window between a
   successful hand-off and the ack is documented and tested: *duplicate, not lost*.
-- **Universal client support.** Claude Code, Cursor, VS Code/Copilot are planned
+- **Universal client support.** Cursor and VS Code/Copilot are planned
   adapters (P3.3/P3.4). Each will be listed as supported only after it is verified
   like Codex was.
 

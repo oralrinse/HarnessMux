@@ -45,7 +45,7 @@ client is explicitly rejected.
 |---|---|---|
 | **P3.1** | **Portable core**: shared MCP tool layer, mailbox skill, MCP registration, packaging notes | ✅ MCP server built and contract-tested (`packages/mcp/`), shared assets in `packages/portable-plugin/` |
 | **P3.2** | **Codex adapter**: the shared MCP server, lifecycle hooks, packaging, install/uninstall | ✅ **verified on a real machine** — Codex 0.154.0 listed the eight tools, called them, and a `delegated` message reached a running DSH session; see [REPORT-p3.2](REPORT-p3.2-codex-adapter.md) for C1–C8 and the two hook-transport defects it uncovered |
-| **P3.3** | **Claude Code adapter**: Claude plugin manifest, its hooks, reusing the shared MCP tools | ⏳ |
+| **P3.3** | **Claude Code adapter**: plugin manifest, `${CLAUDE_PLUGIN_ROOT}`-addressed MCP entry, lifecycle hooks, installer | ✅ **verified on a real machine** — `claude plugin details` shows the plugin loaded with 1 skill, 2 hooks and 1 MCP server, and D1–D9 pass; see [REPORT-p3.3c](REPORT-p3.3c-claude-acceptance.md) for the acceptance and [REPORT-p3.3a](REPORT-p3.3a-claude-recon.md) for the reconnaissance that shaped the adapter |
 | **P3.4** | **Other clients**: Cursor, VS Code / GitHub Copilot, other MCP-capable or plugin-capable clients | ⏳ |
 | **P3.5** | **Compatibility matrix + CI** | ⏳ |
 
@@ -148,7 +148,7 @@ match it.
 |---|---|---|---|
 | D1 | ~~Final project name~~ | — | ✅ **decided: HarnessMux** (directory/package/CLI use `harnessmux`; rationale in [positioning.md §9](positioning.md)) |
 | D2 | **Portable client packaging format.** Whether the shared layer ships as an MCP server + per-client manifest, or as a CLI the adapters call, or both. Affects P3.1/P3.2 directly. | P3.1 | leaning MCP-first for tools, CLI retained for debug/CI/other languages |
-| D3 | **Claude Code adapter capability set.** Which of hooks/skills/MCP it can actually host, measured on a real install rather than assumed from documentation. | P3.3 | unresearched on this machine |
+| D3 | ~~Claude Code adapter capability set~~ | — | ✅ **measured on a real install** (P3.3-A): plugins ship MCP servers, skills and hooks natively, `${CLAUDE_PLUGIN_ROOT}` is substituted into MCP args and hook commands, plugin hooks run with no trust step, and `~/.claude/skills/<name>/` auto-loads — see [REPORT-p3.3a](REPORT-p3.3a-claude-recon.md) |
 | D4 | **Second receiver, and when.** Codex receiver (needs an app-server-owned thread) or a generic pull receiver (any process that polls). Drives P6 and the interface's real validation. | P6.1 | undecided; generic pull is cheaper, Codex is more valuable |
 | D5 | **Whether Mode B (ACP) needs its own client surface**, or can reuse the mailbox's threads for multiplexing. | P5 | undecided |
 

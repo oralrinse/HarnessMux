@@ -235,6 +235,7 @@ writeFileSync(join(OUT, "d2-get-status.txt"), statusText, "utf8");
 // --- D3: Claude → the bound DSH session -----------------------------------------
 const outboundMarker = `CLAUDE-TO-DSH-${Date.now().toString(36).toUpperCase()}`;
 const topic = `claude acceptance ${outboundMarker}`;
+const sendStartedAt = new Date().toISOString();
 const sendRun = claude(
 	[
 		`Use the harnessmux MCP tool send_message with exactly these arguments:`,
@@ -249,16 +250,24 @@ const sendRun = claude(
 );
 writeFileSync(join(OUT, "d3-send.txt"), sendRun.output, "utf8");
 
-// Find the message Claude actually created, by topic.
-const findOutbound = () => core.listMessages(bridge).find((message) => message.topic === topic) ?? null;
+// Find the message THIS run created. Matching by topic alone once picked up a message from a
+// previous run, whose delivery had already been acked — a stale pass that looked like success.
+const findOutbound = () => core.listMessages(bridge)
+	.find((message) => message.topic === topic && message.createdAt >= sendStartedAt) ?? null;
+say("waiting for the harness to hand the message over …");
+say("  (a delivery is made only while the target session is running a turn: if DSH is idle,");
+say("   the message is queued, not lost, and arrives in its next turn — that is by design)");
 await waitUntil(() => findOutbound() !== null, 20_000);
 const outbound = findOutbound();
 const outboundDelivery = outbound
 	? ["queued", "claimed", "acked"].flatMap((state) => core.listDeliveries(bridge, state)).find((delivery) => delivery.messageId === outbound.messageId)
 	: null;
+// 120 s: the pump ticks every 10 s, so this covers many attempts, and the run is worth
+// waiting out rather than mislabelling the documented idle boundary as a defect.
 const outboundAcked = await waitUntil(
 	() => outboundDelivery !== null && core.getDelivery(bridge, outboundDelivery.deliveryId)?.state === "acked",
-	45_000
+	120_000,
+	1_000
 );
 record(
 	"D3 Claude → real DSH session delivery",

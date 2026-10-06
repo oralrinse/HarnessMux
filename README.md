@@ -74,7 +74,7 @@ Honest boundaries — read these before deploying:
 |---|---|
 | **No idle wake** | Delivery happens while the session is running. An idle session is not woken; the delivery waits. *Running session → near-real-time; idle session → next time it runs.* |
 | **Not exactly-once** | The transport is at-least-once by design. Consumers tolerate duplicate delivery ids. |
-| **Clients other than Codex** | **Planned**, not supported yet (P3.3/P3.4). Codex is verified (see *Connect a client*); each other client is listed only after it is verified the same way. |
+| **Clients beyond Codex and Claude Code** | **Planned** (P3.4). Codex and Claude Code are each verified end to end on a real machine (see *Connect a client*); every other client is listed only after it is verified the same way. |
 | **One receiver** | DeepSeek Harness is the only receiver implemented. The receiver interface is specified, not built ([receiver-api.md](docs/receiver-api.md)). |
 
 ## Quick start
@@ -179,9 +179,26 @@ The pick-up hook is a *pull*: it lists what is waiting and never consumes it, so
 Codex is not woken — it simply loses nothing. `node scripts/install.mjs --codex --uninstall`
 removes exactly what the installer added and leaves your own hooks untouched.
 
-**Claude Code, Cursor, VS Code / Copilot** — planned adapters (P3.3/P3.4). They reuse
-the same MCP tools, so the work is a manifest plus a thin adapter, not another client
-implementation.
+**Claude Code** — the adapter is a plugin that ships its own `.mcp.json`, skill and hooks,
+addressed through `${CLAUDE_PLUGIN_ROOT}` so nothing is machine-specific:
+
+```sh
+node scripts/install.mjs --claude --link   # links into ~/.claude/skills/harnessmux
+# then restart the session (or /reload-plugins); it loads as harnessmux@skills-dir
+```
+
+Verified against Claude Code 2.1.215 on a real machine, on the same conditions as Codex:
+`claude plugin details` reports the plugin loaded with 1 skill, 2 hooks and 1 MCP server;
+Claude called the shared tools, a `delegated` message reached a running DeepSeek Harness
+session, and a message waiting for Claude was quoted back by the model on its next turn
+(through `hookSpecificOutput.additionalContext`). See
+[docs/REPORT-p3.3c-claude-acceptance.md](docs/REPORT-p3.3c-claude-acceptance.md).
+
+Worth knowing: Claude needs **no trust step** for plugin hooks (Codex does), and it resolves
+its own plugin directory, so the adapter carries no pointer file for that purpose.
+
+**Cursor, VS Code / Copilot** — planned adapters (P3.4). They reuse the same MCP tools, so the
+work is a manifest plus a thin adapter, not another client implementation.
 
 **Anything else** — the CLI is a first-class surface, not a fallback: it is the
 debugging path, the CI path, and the integration path for languages and clients this

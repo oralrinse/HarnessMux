@@ -67,7 +67,7 @@ Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
 |---|---|
 | **没有 idle 唤醒** | 只有会话在运行时才会投递。空闲会话不会被唤醒，投递会等待。*运行中 → 近实时；空闲 → 等它下次运行。* |
 | **不是 exactly-once** | 传输层按设计是 at-least-once，消费方需容忍重复的 deliveryId。 |
-| **Codex 之外的客户端** | **计划中**，尚未支持（P3.3/P3.4）。每个都要按 Codex 的标准验证过之后才会列进上表。 |
+| **Codex 与 Claude Code 之外的客户端** | **计划中**（P3.4）。Codex 与 Claude Code 均已真机端到端验证（见「接入客户端」）；其它客户端只有在按同样标准验证后才会列出。 |
 | **只有一个 receiver** | DeepSeek Harness 是唯一已实现的 receiver。Receiver 接口只是规范，尚未落地（[receiver-api.md](docs/receiver-api.md)）。 |
 
 ## 快速开始
@@ -145,7 +145,22 @@ codex plugin marketplace add <本仓库路径>
 codex plugin add harnessmux@harnessmux
 ```
 
-**Claude Code、Cursor、VS Code / Copilot** —— 计划中的 adapter（P3.3/P3.4）。它们复用同一套 MCP 工具，
+**Claude Code** —— adapter 是一个自带 `.mcp.json`、skill 与 hooks 的插件，全部通过 `${CLAUDE_PLUGIN_ROOT}` 寻址，因此不含任何与本机绑定的路径：
+
+```sh
+node scripts/install.mjs --claude --link   # 链接到 ~/.claude/skills/harnessmux
+# 然后重启会话（或 /reload-plugins）；它会以 harnessmux@skills-dir 加载
+```
+
+已在真机（Claude Code 2.1.215）按与 Codex 相同的条件验证：`claude plugin details` 显示插件已加载
+（1 skill、2 hooks、1 MCP server）；Claude 调用了共享工具；一条 `delegated` 消息送达运行中的
+DeepSeek Harness 会话；等待 Claude 的消息在其下一个回合被模型**逐字复述**（经
+`hookSpecificOutput.additionalContext`）。详见 [docs/REPORT-p3.3c-claude-acceptance.md](docs/REPORT-p3.3c-claude-acceptance.md)。
+
+值得注意：Claude 的插件 hook **不需要信任步骤**（Codex 需要），且它能解析自身插件目录，因此 adapter
+不需要为此维护指针文件。
+
+**Cursor、VS Code / Copilot** —— 计划中的 adapter（P3.4）。它们复用同一套 MCP 工具，
 因此工作量是一个 manifest + 一层薄 adapter，而不是再写一个客户端实现。
 
 **其它任何东西** —— CLI 是一等公民，不是降级方案：它是调试路径、CI 路径，也是那些本项目永远不会为其写插件的语言与客户端的集成路径。
