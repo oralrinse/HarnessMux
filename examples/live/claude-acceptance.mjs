@@ -60,6 +60,44 @@ function claude(prompt, timeoutMs = 240_000) {
 	}
 }
 
+/** How a non-interactive Claude refuses when it has no usable credential. */
+const AUTH_REFUSAL = /not logged in|please run \/login|failed to authenticate|invalid api key|authentication fails/iu;
+
+/**
+ * Check that a headless Claude can reach a model at all, before judging anything.
+ *
+ * Without this the script ran every remaining step against an empty response and reported
+ * the absence of output as failures of the adapter — which is what happened on the first two
+ * attempts, and it cost a full round trip each time. A run that cannot reach a model is one
+ * configuration problem; it must be said once, plainly, instead of being distributed across
+ * six verdicts.
+ */
+function requireUsableClaude() {
+	const probe = claude("Reply with exactly: READY", 120_000);
+	const lines = probe.output.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+	if (AUTH_REFUSAL.test(probe.output)) {
+		say("FATAL: a non-interactive `claude` cannot authenticate on this machine.");
+		say("");
+		say("       Claude Code here is pointed at a third-party endpoint:");
+		say(`         ANTHROPIC_BASE_URL = ${process.env.ANTHROPIC_BASE_URL ?? "(unset)"}`);
+		say(`         ANTHROPIC_MODEL    = ${process.env.ANTHROPIC_MODEL ?? "(unset)"}`);
+		say("       so it needs a credential for that endpoint. Its own message:");
+		say("");
+		for (const line of lines.slice(0, 6)) say(`         ${line}`);
+		say("");
+		say("       Provide one for this command only — this script never reads or copies it:");
+		say("         $env:ANTHROPIC_API_KEY = \"<your key>\"; node examples/live/claude-acceptance.mjs");
+		process.exit(3);
+	}
+	if (!probe.ok) {
+		say("FATAL: `claude -p` did not complete. Its output:");
+		say("");
+		for (const line of lines.slice(0, 10)) say(`         ${line}`);
+		process.exit(3);
+	}
+	say(`claude -p        : usable (${Math.round(probe.ms / 1000)}s for a one-word reply)`);
+}
+
 /** Wait until `predicate` holds or the budget runs out. */
 async function waitUntil(predicate, timeoutMs = 30_000, stepMs = 500) {
 	const started = Date.now();
@@ -113,10 +151,22 @@ function pickTargetSession(endpoint) {
 	return { session: endpoint?.sessions?.[0] ?? null, how: "first published session" };
 }
 
-const endpoint = core.listEndpoints(bridge).find((entry) => entry.actor === PEER);
+/**
+ * The receiver endpoint to deliver to.
+ *
+ * Prefer the harness's own endpoint and never the decoy this script registers for the
+ * isolation check: an earlier run picked the first endpoint whose actor matched, which was
+ * the decoy left behind by a previous run, and then refused to start because the "published
+ * session" it had chosen was the decoy's fake one.
+ */
+const endpoints = core.listEndpoints(bridge).filter((entry) => entry.actor === PEER);
+const endpoint = endpoints.find((entry) => entry.endpointId === "dsh-endpoint")
+	?? endpoints.find((entry) => !entry.endpointId.startsWith("dsh-decoy"))
+	?? null;
 const published = endpoint?.sessions ?? [];
 if (published.length === 0) {
 	say("FATAL: no DeepSeek Harness session is published at all.");
+	say(`       endpoints seen: ${JSON.stringify(endpoints.map((entry) => ({ id: entry.endpointId, sessions: entry.sessions })))}`);
 	say("       Open a DSH session and keep it running, then retry.");
 	process.exit(1);
 }
@@ -143,6 +193,8 @@ if (picked.how !== "stated with --target-session" && endpointAgeMs > 120_000) {
 }
 
 const targetSession = picked.session;
+// Prove a model is reachable before spending six steps on it.
+requireUsableClaude();
 // The DSH session that must NOT receive anything: any other published session, else a fake
 // endpoint registered for this run so the isolation check still has a second target.
 let decoySession = published.find((id) => id !== targetSession) ?? "decoy-session-not-live";
@@ -152,28 +204,35 @@ if (!published.some((id) => id !== targetSession)) {
 record("setup", true, `plugin at ${pluginPath}; published=${JSON.stringify(published)}; target=${targetSession} (${picked.how}); endpoint refreshed ${ageSeconds}s ago`, "the adapter can be exercised against a target chosen from evidence");
 
 // --- D1/D2: Claude sees and calls the shared MCP server -------------------------
-const statusRun = claude(
-	"Call the harnessmux MCP tool `get_status` and then print its result verbatim between the lines BEGIN and END. Do not use any other tool and do not explain."
+// `claude -p` prints only the model's final text — it does not echo which tools ran. So the
+// only sound evidence is data that *only the tool could have supplied*: the live session id
+// for D1, and the status payload for D2. An earlier version looked for the tool's name in the
+// output and reported a failure while the captured payload proved the call had happened.
+const sessionsRun = claude(
+	"Call the harnessmux MCP tool `list_sessions` and print only the tool's returned text, verbatim. Do not explain and do not use any other tool."
 );
-const statusText = statusRun.output;
-// The MCP tool returns structured JSON, so the protocol marker is a JSON key here, not the
-// CLI's prose line. The first acceptance run checked only for `protocol: v2` and reported a
-// failure while the evidence it captured contained the full, correct get_status payload.
-const sawMcpCall = /get_status/iu.test(statusText);
-const sawServerOutput = /"invariantsOk"\s*:\s*true/u.test(statusText) || /"version"\s*:\s*2/u.test(statusText) || /protocol:\s*v2/iu.test(statusText);
+const sessionsText = sessionsRun.output;
+const sawLiveSession = sessionsText.includes(targetSession);
 record(
 	"D1 Claude lists the HarnessMux MCP tools",
-	sawMcpCall,
-	`the run shows the tool being called: ${sawMcpCall}`,
-	"Claude discovered the server this adapter declares"
+	sawLiveSession,
+	`list_sessions returned the live session id ${targetSession}: ${sawLiveSession}${sawLiveSession ? "" : ` (output: ${sessionsText.slice(0, 300).replace(/\s+/gu, " ")})`}`,
+	"the tool answered with data only the shared bridge knows, so Claude both discovered and reached it"
 );
+
+const statusRun = claude(
+	"Call the harnessmux MCP tool `get_status` and print only the tool's returned text, verbatim. Do not explain and do not use any other tool."
+);
+const statusText = statusRun.output;
+const sawServerOutput = /"invariantsOk"\s*:\s*true/u.test(statusText) || /"version"\s*:\s*2/u.test(statusText) || /protocol:\s*v2/iu.test(statusText);
 record(
 	"D2 Claude calls the shared MCP server",
 	sawServerOutput,
 	`get_status returned the shared server's own payload: ${sawServerOutput}${sawServerOutput ? "" : ` (tail: ${statusText.slice(-300).replace(/\s+/gu, " ")})`}`,
 	"the reply is the shared server's structured output, not a legacy path"
 );
-writeFileSync(join(OUT, "d1-d2-get-status.txt"), statusText, "utf8");
+writeFileSync(join(OUT, "d1-list-sessions.txt"), sessionsText, "utf8");
+writeFileSync(join(OUT, "d2-get-status.txt"), statusText, "utf8");
 
 // --- D3: Claude → the bound DSH session -----------------------------------------
 const outboundMarker = `CLAUDE-TO-DSH-${Date.now().toString(36).toUpperCase()}`;
