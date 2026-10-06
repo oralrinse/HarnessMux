@@ -1,7 +1,7 @@
 {
   "name": "harnessmux",
   "version": "0.1.0",
-  "description": "Control DeepSeek Harness from the AI client you already use: a plugin-first interop layer with a durable, session-aware mailbox (working name; see docs/roadmap.md).",
+  "description": "Control DeepSeek Harness from the AI client you already use: a plugin-first interop layer with a durable, session-aware mailbox (at-least-once, crash-safe).",
   "keywords": [
     "agents",
     "coding-agent",
