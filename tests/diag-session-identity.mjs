@@ -37,7 +37,7 @@ console.log("bindings on disk carry the ACP session id (see the cutover probe)")
 const child = spawn(COMSPEC, ["/d", "/s", "/c", "%DSH_ACP_CMD% --profile acp"], {
 	cwd: CWD,
 	stdio: ["pipe", "pipe", "pipe"],
-	env: { ...process.env, DSH_ACP_CMD: `"${DSH}"`, AGENT_BRIDGE_DIR: ROOT }
+	env: { ...process.env, DSH_ACP_CMD: `"${DSH}"`, HARNESSMUX_DIR: ROOT }
 });
 let nextId = 1;
 const pending = new Map();

@@ -1,15 +1,14 @@
-# Agent Interlink
+# HarnessMux
 
 > **用你已经在用的 AI 客户端，直接控制 DeepSeek Harness。**
 >
 > 面向 AI 客户端与 DeepSeek Harness 的「插件优先」互操作层。
-> *（`agent-bridge` 是当前的工作名——见[命名](docs/roadmap.md#decisions-open)。）*
 
 ```text
 Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
                           │
                           ▼
-                    Agent Interlink
+                       HarnessMux
                           │
                           ▼
                    DeepSeek Harness
@@ -117,7 +116,7 @@ node scripts/install.mjs --dsh-profile desktop     # 改写 package.json + cordi
 
 ```sh
 codex plugin marketplace add <本仓库路径>
-codex plugin add agent-bridge@agent-bridge
+codex plugin add harnessmux@harnessmux
 ```
 
 **Claude Code、Cursor、VS Code / Copilot** —— 计划中的 adapter（P3.3/P3.4）。它们的目标是**复用同一套共享 MCP mailbox 工具**，因此工作量是一个 manifest + 一层薄 adapter，而不是再写一个客户端实现。
@@ -163,7 +162,7 @@ npm run test:live # 对真实 DSH harness + 真实模型（需要装好 DSH）
 | `plugin-v2.test.mjs` | claim→steer→ack、失败即释放、会话隔离、unrouted 安全 |
 | `cutover-faults.test.mjs` | steer 失败、崩溃窗口、长租约重启 |
 
-现场探针与安装器都从环境变量解析宿主，因此仓库里不写死任何机器：设 `DSH_CLI`（launcher 路径）或 `DSH_INSTALL_ROOT`（安装目录），以及 `AGENT_BRIDGE_CWD`（探针会话使用的工作区）。
+现场探针与安装器都从环境变量解析宿主，因此仓库里不写死任何机器：设 `DSH_CLI`（launcher 路径）或 `DSH_INSTALL_ROOT`（安装目录），以及 `HARNESSMUX_CWD`（探针会话使用的工作区）。
 
 pre-commit 钩子会阻止"开发机绝对路径"与"凭据"进入本仓库历史：
 

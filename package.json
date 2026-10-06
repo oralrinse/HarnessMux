@@ -1,5 +1,5 @@
 {
-  "name": "agent-bridge",
+  "name": "harnessmux",
   "version": "0.1.0",
   "description": "Control DeepSeek Harness from the AI client you already use: a plugin-first interop layer with a durable, session-aware mailbox (working name; see docs/roadmap.md).",
   "keywords": [
@@ -24,8 +24,8 @@
     "node": ">=22"
   },
   "bin": {
-    "agent-bridge": "lib/mailbox.mjs",
-    "agent-bridge-v2": "lib/mailbox-v2.mjs"
+    "harnessmux": "lib/mailbox.mjs",
+    "harnessmux-v2": "lib/mailbox-v2.mjs"
   },
   "exports": {
     ".": "./lib/core.mjs",

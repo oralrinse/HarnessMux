@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"H:/PersonalComputerSoftware/Code/repository/agent-bridge/lib/mailbox.mjs\" read --actor codex",
+            "command": "node \"H:/PersonalComputerSoftware/Code/repository/harnessmux/lib/mailbox.mjs\" read --actor codex",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"H:/PersonalComputerSoftware/Code/repository/agent-bridge/lib/mailbox.mjs\" read --actor codex",
+            "command": "node \"H:/PersonalComputerSoftware/Code/repository/harnessmux/lib/mailbox.mjs\" read --actor codex",
             "timeout": 10
           }
         ]

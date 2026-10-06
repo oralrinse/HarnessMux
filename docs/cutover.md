@@ -61,7 +61,7 @@ so v2 must not invent one. They sit in `queue/` as `awaitingBinding` until a
 
 ```sh
 # 0. Baseline: nothing may be mid-flight.
-agent-bridge-v2 --root <root> status
+harnessmux-v2 --root <root> status
 
 # 1. Stop the writers — this is the quiescence window.
 #    - quit the DSH Desktop app (or stop `dsh web`)

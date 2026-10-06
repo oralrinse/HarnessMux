@@ -1,8 +1,8 @@
 /**
- * agent-bridge installer for DeepSeek Harness.
+ * harnessmux installer for DeepSeek Harness.
  *
  * Does two things, both idempotent and both reversible:
- *   1. builds the bridge mailbox (default: `<workspace>/.agent-bridge`);
+ *   1. builds the bridge mailbox (default: `<workspace>/.harnessmux`);
  *   2. wires this repository into a DSH profile as a local plugin
  *      (`package.json` link + profile `bundles` entry + `cordis.patch.yml` row),
  *      writing `.bak-<timestamp>` copies of every file it edits.
@@ -17,7 +17,7 @@
  *   peer:       the other agent's actor     (default codex)
  *   autoWake:   false disables steering     (default true)
  *
- * @module agent-bridge/install
+ * @module harnessmux/install
  */
 
 import { execFileSync } from "node:child_process";
@@ -30,7 +30,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..");
 /** The DSH host plugin is its own package inside the repository. */
 const PLUGIN_DIR = join(REPO_ROOT, "plugin");
-const PACKAGE_NAME = "@local/agent-bridge";
+const PACKAGE_NAME = "@local/harnessmux";
 
 /**
  * Parse `--key value` / `--flag` arguments.
@@ -67,11 +67,13 @@ function profileDir(profile) {
 }
 
 /**
- * The DSH launcher: `DSH_CLI` when set, else a bundled launcher next to this
- * machine's install (`DSH_INSTALL_ROOT`, default `DeepSeek Harness` in the usual
- * Windows locations), else plain `dsh` from PATH.
+ * The DSH launcher: `DSH_CLI` when set, else a bundled launcher found in the
+ * standard install locations, else plain `dsh` from PATH.
  *
- * Nothing here is required: `--print-only` and `--dry-run` work without DSH.
+ * Note what is deliberately *not* a candidate root: a path derived from
+ * `DSH_HOME`. `DSH_HOME` is the harness's data directory (`~/.dsh`), so walking
+ * up from it yields the user profile — a guess that silently produced a wrong
+ * path and made the bundled-pnpm detection fail.
  */
 function dshCommand() {
 	const configured = process.env.DSH_CLI?.trim();
@@ -86,9 +88,9 @@ function dshCommand() {
 function bundledCandidates(...parts) {
 	const roots = [
 		process.env.DSH_INSTALL_ROOT?.trim(),
-		process.env.DSH_HOME?.trim() ? join(process.env.DSH_HOME.trim(), "..", "..") : "",
 		"C:\\Program Files\\DeepSeek Harness",
-		process.env.LOCALAPPDATA?.trim() ? join(process.env.LOCALAPPDATA.trim(), "Programs", "DeepSeek Harness") : ""
+		process.env.LOCALAPPDATA?.trim() ? join(process.env.LOCALAPPDATA.trim(), "Programs", "DeepSeek Harness") : "",
+		process.env.ProgramFiles?.trim() ? join(process.env.ProgramFiles.trim(), "DeepSeek Harness") : ""
 	].filter(Boolean);
 	return roots.map((root) => join(root, "resources", "runtime", ...parts));
 }
@@ -119,7 +121,7 @@ function yamlPath(path) {
 const options = parseArgs(process.argv.slice(2));
 const profile = typeof options["dsh-profile"] === "string" ? options["dsh-profile"] : "desktop";
 const dryRun = options["dry-run"] === true;
-const bridge = resolve(typeof options.bridge === "string" ? options.bridge : join(process.cwd(), ".agent-bridge"));
+const bridge = resolve(typeof options.bridge === "string" ? options.bridge : join(process.cwd(), ".harnessmux"));
 const dir = profileDir(profile);
 
 const MANUAL = `Manual setup (equivalent to what this script does):
@@ -134,7 +136,7 @@ const MANUAL = `Manual setup (equivalent to what this script does):
 3. In ${dir}\\cordis.patch.yml add (replace a bare \`[]\`; never append after it,
    because two YAML documents make the overlay unparsable):
      - insert:
-         - id: agent-bridge
+         - id: harnessmux
            name: '${PACKAGE_NAME}'
            # optional:
            # config:
@@ -154,7 +156,7 @@ if (options["print-only"] === true) {
 }
 
 if (!existsSync(dir)) {
-	process.stderr.write(`agent-bridge: no DSH profile at ${dir}\nCreate it first (run the harness once), or pass --dsh-profile <name>.\n`);
+	process.stderr.write(`harnessmux: no DSH profile at ${dir}\nCreate it first (run the harness once), or pass --dsh-profile <name>.\n`);
 	process.exit(1);
 }
 
@@ -203,13 +205,13 @@ function meaningfulYaml(text) {
 		.trim();
 }
 if (patch.includes(`name: '${PACKAGE_NAME}'`) || patch.includes(`name: "${PACKAGE_NAME}"`)) {
-	process.stdout.write(`cordis.patch.yml already has the agent-bridge row\n`);
+	process.stdout.write(`cordis.patch.yml already has the harnessmux row\n`);
 } else {
 	const row = [
 		"",
-		"# agent-bridge: a mailbox shared with a peer coding agent (see the agent-bridge repo)",
+		"# harnessmux: a mailbox shared with a peer coding agent (see the harnessmux repo)",
 		"- insert:",
-		"    - id: agent-bridge",
+		"    - id: harnessmux",
 		`      name: '${PACKAGE_NAME}'`,
 		`      config:`,
 		`        bridgeRoot: ${yamlPath(bridge)}`,
@@ -229,7 +231,7 @@ if (patch.includes(`name: '${PACKAGE_NAME}'`) || patch.includes(`name: "${PACKAG
 		if (patch) backup(patchPath);
 		writeFileSync(patchPath, `${header}${row}`, "utf8");
 	}
-	process.stdout.write(`${dryRun ? "[dry-run] " : ""}${isEmptyDocument ? "replaced the empty overlay with" : "appended"} the agent-bridge row in ${patchPath}\n`);
+	process.stdout.write(`${dryRun ? "[dry-run] " : ""}${isEmptyDocument ? "replaced the empty overlay with" : "appended"} the harnessmux row in ${patchPath}\n`);
 }
 
 // 4. pnpm install

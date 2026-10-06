@@ -128,7 +128,7 @@ match it.
 
 | # | Decision | Needed by | Current state |
 |---|---|---|---|
-| D1 | **Final project name.** `agent-bridge` collides with existing projects (including a Codex + DeepSeek Harness one), and a client-neutral name fits the positioning better. Working candidate: *Agent Interlink*. | P3.1 (rename once, with the monorepo move) | undecided; directory/package keep the working name |
+| D1 | ~~Final project name~~ | — | ✅ **decided: HarnessMux** (directory/package/CLI use `harnessmux`; rationale in [positioning.md §9](positioning.md)) |
 | D2 | **Portable client packaging format.** Whether the shared layer ships as an MCP server + per-client manifest, or as a CLI the adapters call, or both. Affects P3.1/P3.2 directly. | P3.1 | leaning MCP-first for tools, CLI retained for debug/CI/other languages |
 | D3 | **Claude Code adapter capability set.** Which of hooks/skills/MCP it can actually host, measured on a real install rather than assumed from documentation. | P3.3 | unresearched on this machine |
 | D4 | **Second receiver, and when.** Codex receiver (needs an app-server-owned thread) or a generic pull receiver (any process that polls). Drives P6 and the interface's real validation. | P6.1 | undecided; generic pull is cheaper, Codex is more valuable |

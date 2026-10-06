@@ -1,5 +1,5 @@
 {
-  "name": "@local/agent-bridge",
+  "name": "@local/harnessmux",
   "version": "0.1.0",
   "private": true,
   "type": "module",

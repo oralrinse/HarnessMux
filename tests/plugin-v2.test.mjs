@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ROOT = join(import.meta.dirname, "..", "test-bridge-plugin-v2");
-process.env.AGENT_BRIDGE_DIR = ROOT;
+process.env.HARNESSMUX_DIR = ROOT;
 
 rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 mkdirSync(ROOT, { recursive: true });

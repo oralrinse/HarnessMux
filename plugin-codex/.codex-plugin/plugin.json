@@ -1,17 +1,17 @@
 {
-  "name": "agent-bridge",
+  "name": "harnessmux",
   "version": "0.1.0",
-  "description": "Talk to a peer coding agent (DeepSeek Harness or any agent-bridge participant) through a shared local mailbox: read its instructions, report results, and ask follow-up questions.",
+  "description": "Talk to a peer coding agent (DeepSeek Harness or any harnessmux participant) through a shared local mailbox: read its instructions, report results, and ask follow-up questions.",
   "author": {
-    "name": "agent-bridge contributors"
+    "name": "harnessmux contributors"
   },
-  "homepage": "https://github.com/agent-bridge/agent-bridge",
-  "repository": "https://github.com/agent-bridge/agent-bridge",
+  "homepage": "https://github.com/harnessmux/harnessmux",
+  "repository": "https://github.com/harnessmux/harnessmux",
   "license": "MIT",
   "keywords": [
     "agent",
     "agents",
-    "agent-bridge",
+    "harnessmux",
     "mailbox",
     "multi-agent",
     "delegate",
@@ -25,12 +25,12 @@
     "displayName": "Agent Bridge",
     "shortDescription": "Exchange instructions with a peer agent",
     "longDescription": "Connect this Codex session to a peer coding agent running on the same machine (for example DeepSeek Harness) through a shared file mailbox. Read the peer's instructions, report progress and results back on the same thread, and ask follow-up questions. Use Agent Bridge when work is split between two agents, when another agent is waiting on your result, or when the user says another agent sent instructions.",
-    "developerName": "agent-bridge",
+    "developerName": "harnessmux",
     "category": "Productivity",
     "capabilities": [
       "Write"
     ],
-    "websiteURL": "https://github.com/agent-bridge/agent-bridge",
+    "websiteURL": "https://github.com/harnessmux/harnessmux",
     "defaultPrompt": [
       "Check the agent bridge for new instructions",
       "Report the test results to the peer agent",

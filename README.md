@@ -1,15 +1,14 @@
-# Agent Interlink
+# HarnessMux
 
 > **Control DeepSeek Harness from the AI client you already use.**
 >
 > A plugin-first interoperability layer for AI clients and DeepSeek Harness.
-> *(`agent-bridge` is the working name — see [naming](docs/roadmap.md#decisions-open).)*
 
 ```text
 Codex • Claude Code • Cursor • VS Code / Copilot • MCP clients
                           │
                           ▼
-                    Agent Interlink
+                      HarnessMux
                           │
                           ▼
                    DeepSeek Harness
@@ -130,7 +129,7 @@ a local marketplace:
 
 ```sh
 codex plugin marketplace add <path to this repo>
-codex plugin add agent-bridge@agent-bridge
+codex plugin add harnessmux@harnessmux
 ```
 
 **Claude Code, Cursor, VS Code / Copilot** — planned adapters (P3.3/P3.4). They are
@@ -182,7 +181,7 @@ npm run test:live # against a real DSH harness + real model (needs DSH installed
 
 The live probes and the installer resolve the host from the environment, so nothing
 hard-codes a machine: set `DSH_CLI` (launcher path) or `DSH_INSTALL_ROOT` (install
-directory), and `AGENT_BRIDGE_CWD` (the workspace probe sessions should use).
+directory), and `HARNESSMUX_CWD` (the workspace probe sessions should use).
 
 A pre-commit hook blocks absolute developer paths and credentials from entering this
 repository's history:

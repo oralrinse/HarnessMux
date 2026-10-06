@@ -1,5 +1,5 @@
 /**
- * Live ACP probe for the mounted agent-bridge plugin.
+ * Live ACP probe for the mounted harnessmux plugin.
  *
  * Spawns the real DSH ACP server (`dsh --profile acp`), completes the ACP v1
  * handshake, creates a session, and reports:

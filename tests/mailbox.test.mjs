@@ -78,7 +78,7 @@ assert.throws(() => postMessage(ROOT, { from: "bad actor!", to: "dsh", body: "x"
 
 // --- CLI: post / list / read / reply / status -----------------------------------
 rmSync(ROOT, { recursive: true, force: true });
-assert.match(cli("init"), /agent-bridge ready/u, "cli init prints the root");
+assert.match(cli("init"), /harnessmux ready/u, "cli init prints the root");
 assert.match(cli("post", "--from", "codex", "--to", "dsh", "--topic", "cli test", "--kind", "question", "--body", "are you there?", "--expect-reply"), /codex -> dsh/u, "cli post renders the message");
 
 const bodyFile = join(ROOT, "body.md");
@@ -96,7 +96,7 @@ assert.equal(typeof status.pendingTotal, "number", "cli status is machine readab
 assert.equal(cli("read", "--actor", "dsh", "--peek"), cli("read", "--actor", "dsh", "--peek"), "peek is stable across calls");
 
 // --- root resolution -----------------------------------------------------------
-process.env.AGENT_BRIDGE_DIR = ROOT;
-assert.equal(resolveBridgeRoot(), ROOT, "AGENT_BRIDGE_DIR wins over the cache");
+process.env.HARNESSMUX_DIR = ROOT;
+assert.equal(resolveBridgeRoot(), ROOT, "HARNESSMUX_DIR wins over the cache");
 
 console.log("mailbox.test.mjs: all assertions passed");

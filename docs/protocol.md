@@ -1,9 +1,9 @@
-# The agent-bridge mailbox protocol
+# The harnessmux mailbox protocol
 
 > **v2 设计已冻结（见 DESIGN.md §0.3），本节描述的是 v1 原型。**
 > v1 的核心缺陷：`read` 是 destructive move（把"已移动"当成"已消费"），且用单调整的
 > cursor 承担正确性 —— 二者在崩溃与并发下都不成立。v2 用 `messages`/`queue`/`claims`/`acks`
-> 四层把「消息」与「投递」分开，语义为 **at-least-once**。迁移工具 `agent-bridge migrate` 待实现。
+> 四层把「消息」与「投递」分开，语义为 **at-least-once**。迁移工具 `harnessmux migrate` 待实现。
 
 ## v1（当前实现，将被 v2 取代）
 

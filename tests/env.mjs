@@ -8,12 +8,12 @@
  *
  *   DSH_CLI           absolute path to the DSH launcher (dsh.cmd / dsh)
  *   DSH_INSTALL_ROOT  install root, when it is not in a standard location
- *   AGENT_BRIDGE_CWD  workspace the probe sessions should use (default: process.cwd())
+ *   HARNESSMUX_CWD  workspace the probe sessions should use (default: process.cwd())
  *
  * Importing this module never exits: call `requireDsh()` when a probe actually
  * needs the launcher, so a syntax check or `--help` run still works anywhere.
  *
- * @module agent-bridge/tests/env
+ * @module harnessmux/tests/env
  */
 
 import { existsSync } from "node:fs";
@@ -42,10 +42,10 @@ export const DSH = (() => {
 })();
 
 /** Workspace the probe's sessions should run in. */
-export const CWD = resolve(process.env.AGENT_BRIDGE_CWD?.trim() || process.cwd());
+export const CWD = resolve(process.env.HARNESSMUX_CWD?.trim() || process.cwd());
 
 /** The v2 bridge root the probes expect. */
-export const BRIDGE_ROOT = process.env.AGENT_BRIDGE_DIR?.trim() ?? join(CWD, ".agent-bridge-v2");
+export const BRIDGE_ROOT = process.env.HARNESSMUX_DIR?.trim() ?? join(CWD, ".harnessmux-v2");
 
 /**
  * Require the DSH launcher, exiting with an actionable message when absent.
@@ -55,7 +55,7 @@ export const BRIDGE_ROOT = process.env.AGENT_BRIDGE_DIR?.trim() ?? join(CWD, ".a
 export function requireDsh() {
 	if (DSH) return DSH;
 	console.error([
-		"agent-bridge: cannot find the DeepSeek Harness launcher.",
+		"harnessmux: cannot find the DeepSeek Harness launcher.",
 		"Set DSH_CLI to its absolute path, or DSH_INSTALL_ROOT to the install directory.",
 		"Example:  DSH_CLI='C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd'"
 	].join("\n"));

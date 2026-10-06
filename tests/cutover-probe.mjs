@@ -54,7 +54,7 @@ const COMSPEC = process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe";
 const child = spawn(COMSPEC, ["/d", "/s", "/c", "%DSH_ACP_CMD% --profile acp"], {
 	cwd: CWD,
 	stdio: ["pipe", "pipe", "pipe"],
-	env: { ...process.env, DSH_ACP_CMD: `"${DSH}"`, AGENT_BRIDGE_DIR: ROOT }
+	env: { ...process.env, DSH_ACP_CMD: `"${DSH}"`, HARNESSMUX_DIR: ROOT }
 });
 
 let nextId = 1;
@@ -234,15 +234,20 @@ try {
 	);
 
 	// --- V4-2 accounting -----------------------------------------------------
+	// The thread accumulates messages across probe runs, so the invariant that
+	// matters is about *this* delivery's message: exactly one copy, exactly one
+	// ack, nothing left queued or claimed. Asserting a fixed thread size made the
+	// check fail purely because earlier runs had used the same thread.
 	const ackedAll = core.listDeliveries(ROOT, "acked").filter((entry) => entry.deliveryId === boundDelivery.deliveryId);
 	const leftQueued = core.listDeliveries(ROOT, "queued").filter((entry) => entry.deliveryId === boundDelivery.deliveryId);
 	const leftClaimed = core.listDeliveries(ROOT, "claimed").filter((entry) => entry.deliveryId === boundDelivery.deliveryId);
+	const copiesOfThisMessage = core.listMessages(ROOT).filter((message) => message.messageId === bound.messageId);
 	const messagesInThread = core.listMessages(ROOT).filter((message) => message.threadId === bound.threadId);
 	record(
 		"V4-2 lifecycle accounting",
-		ackedAll.length === 1 && leftQueued.length === 0 && leftClaimed.length === 0 && messagesInThread.length === 2,
-		`acks=${ackedAll.length} queuedLeft=${leftQueued.length} claimedLeft=${leftClaimed.length} messagesInThread=${messagesInThread.length} attempt=${boundState.attempt} ackRecord=${JSON.stringify(ackedAll[0] ?? null)}`,
-		"claim → steer → ack happened exactly once; the immutable message was not duplicated"
+		ackedAll.length === 1 && leftQueued.length === 0 && leftClaimed.length === 0 && copiesOfThisMessage.length === 1,
+		`acks=${ackedAll.length} queuedLeft=${leftQueued.length} claimedLeft=${leftClaimed.length} copiesOfMessage=${copiesOfThisMessage.length} messagesInThread=${messagesInThread.length} attempt=${boundState.attempt} ackRecord=${JSON.stringify(ackedAll[0] ?? null)}`,
+		"claim → steer → ack happened exactly once; the immutable message exists exactly once"
 	);
 
 	// --- V1: what the transport does with idle sessions -----------------------

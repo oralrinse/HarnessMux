@@ -138,8 +138,11 @@ broadcasting to all of them, is out of scope permanently.
 
 ## 9. Naming
 
-The directory and package keep the working name `agent-bridge` for now. A final name
-is deliberately undecided — `agent-bridge` collides with several existing projects,
-and a client-neutral name (for example *Agent Interlink*) fits the framing above
-better. The decision is tracked in [roadmap.md](roadmap.md#decisions-open) and lands
-with the P3 monorepo move, so that a rename happens once, not twice.
+The project is **HarnessMux**: *Harness* names the receiver it targets today, *Mux*
+describes what it does — multiplexing several AI clients onto one harness without
+letting their sessions bleed into each other. The repository directory, the npm
+package and the CLI binaries use the lower-case form (`harnessmux`, `harnessmux-v2`).
+
+The name is deliberately client-neutral: adding a client must never require renaming
+the project. Should a second **receiver** ever ship, the tagline widens from
+"…and DeepSeek Harness" to the framing in §6 — the name still fits.

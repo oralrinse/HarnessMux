@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ROOT = join(import.meta.dirname, "..", "test-bridge");
-process.env.AGENT_BRIDGE_DIR = ROOT;
+process.env.HARNESSMUX_DIR = ROOT;
 
 rmSync(ROOT, { recursive: true, force: true });
 mkdirSync(ROOT, { recursive: true });
@@ -105,7 +105,7 @@ async function call(tool, args) {
 }
 
 // 1. registration surface
-assert.equal(plugin.name, "agent-bridge", "plugin name matches the patch row");
+assert.equal(plugin.name, "harnessmux", "plugin name matches the patch row");
 assert.deepEqual(plugin.inject, ["tools", "systemPrompt", "agents"], "plugin declares its services (agents is required by the v2 pump)");
 assert.equal(mock.registered.length, 1, "exactly one tool is registered");
 
@@ -130,7 +130,7 @@ assert.equal(typeof tool.output?.render, "function", "the tool declares an outpu
 
 // 2. guidance + briefing
 assert.equal(mock.sections.length, 1, "one prompt section is registered");
-assert.match(mock.sections[0].text, /agent-bridge mailbox/u);
+assert.match(mock.sections[0].text, /harnessmux mailbox/u);
 const created = mock.handlers.get("agent/created");
 assert.ok(created, "agent/created is handled");
 await created({ agent: mock.agent });
@@ -152,7 +152,7 @@ assert.match(JSON.stringify(mock.injected[0]), /mailbox/u);
 		assert.equal(typeof message.id, "string", "the message has a string id");
 		assert.ok(message.id.length > 0, "the id is non-empty");
 		assert.equal(message.role, "user", "the message is a user message");
-		assert.equal(message.source?.kind, "agent-bridge", "the message is stamped with its source");
+		assert.equal(message.source?.kind, "harnessmux", "the message is stamped with its source");
 	}
 }
 

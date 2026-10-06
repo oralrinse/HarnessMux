@@ -1,5 +1,5 @@
 ---
-name: agent-bridge
+name: harnessmux
 description: Exchange instructions, results, and follow-up questions with a peer coding agent (for example DeepSeek Harness) over a shared local file mailbox. Use when another agent is directing this work, when the user says a peer agent sent instructions, or when this session's result must be reported back to another agent.
 ---
 
@@ -16,7 +16,7 @@ automatically when your message arrives.
 The CLI lives next to this plugin's repository. Resolve the root once:
 
 ```sh
-agent-bridge status --json          # if the CLI is on PATH
+harnessmux status --json          # if the CLI is on PATH
 # otherwise (typical install):
 node <repo>/lib/mailbox.mjs status --json
 ```
@@ -25,8 +25,8 @@ node <repo>/lib/mailbox.mjs status --json
 `exists: false`, the mailbox has not been created yet: run
 `node <repo>/lib/mailbox.mjs init --root <path>`.
 
-The root is also remembered in `~/.dsh/agent-bridge-root.txt`, so plain
-`agent-bridge status` works after the first run.
+The root is also remembered in `~/.dsh/harnessmux-root.txt`, so plain
+`harnessmux status` works after the first run.
 
 ## Read what the peer sent you
 

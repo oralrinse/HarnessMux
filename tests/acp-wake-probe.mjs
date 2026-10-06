@@ -86,7 +86,7 @@ child.stdout.on("data", (chunk) => {
 			if (text) assistantText.push(text);
 		} else if (kind === "agent_thought_chunk") {
 			const text = update.content?.text ?? "";
-			if (text && /mailbox|agent-bridge|ZEBRA|pending/i.test(text)) notes.push(`thought: ${text.slice(0, 200)}`);
+			if (text && /mailbox|harnessmux|ZEBRA|pending/i.test(text)) notes.push(`thought: ${text.slice(0, 200)}`);
 		}
 	}
 });

@@ -1,4 +1,4 @@
-# agent-bridge — 项目方案（工程记录）
+# harnessmux — 项目方案（工程记录）
 
 > ⚠️ **定位已更新（2026-10-06，本轮）。** 本文档的**定位表述**已被取代，**工程结论与技术事实不变**。
 >
@@ -26,8 +26,8 @@
 **已完成并验证**
 - 协议核心 + CLI + 三套测试（`mailbox` 12 断言 / `manifest` 打包契约 / `plugin` 含输出契约与 dispose）全绿。
 - DSH 侧插件**已在真实 DSH 进程装载**：`dsh --profile acp` 探针从"装载被跳过"→"工具注册被拒"→**进入执行阶段**，逐层暴露并修掉了 3 个真实缺陷（见 6.0 与 §12 缺陷清单）。
-- 两个 profile（`desktop`、`acp`）都已接线：`dependencies` 指向 `…/agent-bridge/plugin`、`bundles` 已含 `@local/agent-bridge`、`cordis.patch.yml` 有 insert 行；真实邮箱在 `default-workspace\.agent-bridge`。
-- Codex 侧插件清单与 SKILL 已写好（`.codex-plugin/plugin.json`、`skills/agent-bridge/SKILL.md`、`hooks/hooks.template.json`、`.agents/plugins/marketplace.json`）。
+- 两个 profile（`desktop`、`acp`）都已接线：`dependencies` 指向 `…/harnessmux/plugin`、`bundles` 已含 `@local/harnessmux`、`cordis.patch.yml` 有 insert 行；真实邮箱在 `default-workspace\.harnessmux`。
+- Codex 侧插件清单与 SKILL 已写好（`.codex-plugin/plugin.json`、`skills/harnessmux/SKILL.md`、`hooks/hooks.template.json`、`.agents/plugins/marketplace.json`）。
 
 **未完成（续做顺序）**
 1. **重跑 `tests/acp-live-probe.mjs`**：确认 `mailbox` 工具这次真的出现在模型工具集里，并观察到自动唤醒（`agent_thought_chunk` 里出现桥消息内容）。工具契约已修好但**修复后尚未再跑探针**——这是唯一未闭合的验证环。
@@ -47,7 +47,7 @@
 |---|---|
 | 插件在真实 ACP profile 装载 | `dsh --profile acp` 的 `session/new` 成功，再无 `skipping profile bundle` / 注册被拒告警 |
 | `mailbox` 工具进入模型工具集并被调用 | 探针观测到 `tool_call mailbox in_progress` → `tool_call_update completed` |
-| 模型**无需提示**即知道桥存在 | 提示词只问"Do you have anything waiting from the peer agent right now?"，从未提到 mailbox/agent-bridge |
+| 模型**无需提示**即知道桥存在 | 提示词只问"Do you have anything waiting from the peer agent right now?"，从未提到 mailbox/harnessmux |
 | 模型主动读取未读消息 | 回答原文引用了两条消息正文，含标记 `ZEBRA-917` |
 | 模型主动回执且线程正确 | 生成 `…-84bd2f9e`，`dsh -> codex (report)`，`replyTo=…-d80ae6b2`，`threadId=autonomous-check-cd3ea2d1` |
 | Codex 侧可读到该回执 | 邮箱状态 `pendingByActor: { codex: 1 }`，`read --actor codex --peek` 打出完整回执 |
@@ -89,7 +89,7 @@ schema must be a JSON Schema of 'type: "object"', got 'type: null'.
 | R10 | actor ≠ session：多 DSH 会话时 `to: dsh` 路由不确定，会污染其他会话 | ✅ **成立，第二大结构问题** | 协议只有 `from/to`。需引入 `actor / endpoint / session / thread` 四层 + 显式绑定；默认改为**专用 bridge executor 会话**，不往人类当前会话随机塞外部指令 |
 | R11 | MCP 用官方 SDK，不手写 JSON-RPC；core 保持零依赖 | ✅ 成立 | 依赖边界："核心零依赖，适配器可用官方 SDK"。Q4 采纳 SDK（包可用性待验，见 V2） |
 | R12 | 安全不足：需要 advisory/delegated 两级信任，而非只靠提示词 | ✅ **成立** | "人类优先"是给模型的 instruction，不是 capability boundary。`instruction` 类消息默认不得在当前会话自动触发工具；delegated 才交沙箱+审批策略约束 |
-| R13 | `log/ 永不删除` 与"禁止写 secret"冲突，需要可配置保留 + `gc` | ✅ 成立 | 改为 `audit{enabled,retentionDays,maxBytes}` + `agent-bridge gc` |
+| R13 | `log/ 永不删除` 与"禁止写 secret"冲突，需要可配置保留 + `gc` | ✅ 成立 | 改为 `audit{enabled,retentionDays,maxBytes}` + `harnessmux gc` |
 | R14 | id 随机后缀仅 32bit，建议 UUIDv7 | ✅ 成立（低风险但改动便宜） | 换 UUIDv7；**同时明确**：顺序不再用于正确性（与 R2 配套） |
 | R15 | 示例消息 `replyTo` 指向自己 | ✅ 成立（文档笔误） | 已在 §5 修正说明；实现侧本就只在回复时写该字段 |
 | R16 | 阶段重排：P0.5 协议改造 → P2 真机 gate → P3 portable plugin → P4 ACP controller | ⚠️ 顺序部分不采纳 | P2 的真机 gate **本轮已完成核心部分**（见 §0.1），剩下的只是桌面端重启；因此 P0.5 与"桌面端收尾"应并行，而不是先停 P2 |
@@ -242,7 +242,7 @@ agent.steer(message) 成功
 
 **v2 接线状态（P0.5-cutover，2026-10-06）**
 
-- `lib/migrate.mjs` + `agent-bridge-v2 migrate --source <v1> [--dry-run]`：**已实现并测试**
+- `lib/migrate.mjs` + `harnessmux-v2 migrate --source <v1> [--dry-run]`：**已实现并测试**
   （`tests/migrate.test.mjs` 全绿）。规则：legacy id 原样保留；v1 `read/` → `legacy-consumed`（**绝不**伪造 ack）；
   `inbox/read/log` 取并集、正文不一致即 `MIGRATION_CONFLICT` 停止；journal 记录 message/delivery 映射以保证可重入；
   迁移出的投递一律 **unrouted**（v1 没有路由信息，v2 不猜）。
@@ -307,7 +307,7 @@ agent.steer(message) 成功
 ## 4. 架构
 
 ```
-                     ┌──────────────────── agent-bridge 仓库（无依赖，可移植）────────────────────┐
+                     ┌──────────────────── harnessmux 仓库（无依赖，可移植）────────────────────┐
                      │  lib/core.mjs   协议唯一实现：原子写 / 游标 / 线程 / 清单                  │
                      │  lib/mailbox.mjs   CLI：任何语言、任何进程都能收发                          │
                      │  plugin-dsh/     DSH 宿主插件（工具 + 简报 + 自动唤醒）                     │
@@ -331,7 +331,7 @@ agent.steer(message) 成功
 1. Codex 写 `inbox/<id>.json`（`from: codex, to: dsh, kind: instruction`）。
 2. DSH 插件 10s 巡检发现有未读 → `agent.steer(...)` 把内容送进当前会话（C2 的正解：进程内插件可以注入）。
 3. DSH 执行后用 `mailbox action=reply` 回执（同线程）。
-4. Codex 侧 hooks 在下次工具调用前调用 `agent-bridge read --actor codex`，看到回执。
+4. Codex 侧 hooks 在下次工具调用前调用 `harnessmux read --actor codex`，看到回执。
 
 **降级路径**（任一插件缺失时仍可用）：人喊一声 → DSH 调 `mailbox read`；或 Codex 用 `codex exec` 调 CLI。协议不依赖插件。
 
@@ -383,18 +383,18 @@ agent.steer(message) 成功
 ## 6. 仓库结构与各模块（含状态）
 
 ```
-agent-bridge/
+harnessmux/
   package.json  LICENSE(MIT)  .gitignore  README.md  DESIGN.md(本文)
   .agents/plugins/marketplace.json  ✅ 已实现 Codex 本地 marketplace（列 plugin-codex）
   lib/core.mjs              ✅ 已实现 协议 + 校验（无依赖）
   lib/mailbox.mjs           ✅ 已实现 CLI（init/post/reply/read/list/get/done/status/cursor/root）
   plugin/                   ✅ 已实现 DSH 宿主插件包
-  plugin/package.json       ✅ 已实现（name=@local/agent-bridge，**必须声明 dsh.bundle.patch**）
+  plugin/package.json       ✅ 已实现（name=@local/harnessmux，**必须声明 dsh.bundle.patch**）
   plugin/cordis.patch.yml   ✅ 已实现（insert 行；**单 YAML 文档**）
   plugin/index.js           ✅ 已实现
   plugin-codex/             ✅ 已实现（清单 + SKILL；hooks 模板）
   plugin-codex/.codex-plugin/plugin.json  ✅
-  plugin-codex/skills/agent-bridge/SKILL.md ✅
+  plugin-codex/skills/harnessmux/SKILL.md ✅
   plugin-codex/hooks/hooks.template.json  ✅ 模板（opt-in）
   mcp/server.mjs            ⏳ 设计（见 6.3）
   peers/*.mjs               ⏳ 设计（见 6.4）
@@ -415,7 +415,7 @@ DSH 装载一个 profile bundle 时要同时满足三件事，缺一即**静默�
 
 1. profile 的 `dependencies` 里有该包，且 `node_modules` 里真的有链接；
 2. 该包的 `package.json` **必须声明 `dsh.bundle.patch`**，否则报
-   `skipping profile bundle "@local/agent-bridge": declares no dsh.bundle in its package.json`；
+   `skipping profile bundle "@local/harnessmux": declares no dsh.bundle in its package.json`；
 3. 该 patch 文件必须是**单个 YAML 文档**。DSH 出厂的空 profile patch 是 `[]`，若在其后追加 `- insert:`，
    就是两个文档，启动直接 `dsh: failed to parse overlay ...` 而崩溃。
 
@@ -434,7 +434,7 @@ DSH 装载一个 profile bundle 时要同时满足三件事，缺一即**静默�
 | `ctx.on("agent/created", ({agent}) => agent.inject(msg))` | 会话级简报 | `msg` 由 `createUserMessage({content, source})` 构造 |
 | `setInterval` + `agent.steer(msg)` | 未读自动唤醒 | 每个未读批次每 agent 只 steer 一次；`ctx.effect` 负责清理 |
 
-**依赖策略（可移植性的关键）**：加载期不 import 任何 DSH 包。`@deepseek-ai/dsh-llm` 用顶层动态 import **机会式**获取，失败则退化为字面量用户消息 `{role:"user", content:[{type:"text"}], source:{kind:"agent-bridge"}}`。理由：插件的 import 失败会拖垮整个 profile（官方 README 的设计哲学亦是如此）。邮箱逻辑按相对路径 `../lib/core.mjs` 引入，插件与 CLI 永不漂移。
+**依赖策略（可移植性的关键）**：加载期不 import 任何 DSH 包。`@deepseek-ai/dsh-llm` 用顶层动态 import **机会式**获取，失败则退化为字面量用户消息 `{role:"user", content:[{type:"text"}], source:{kind:"harnessmux"}}`。理由：插件的 import 失败会拖垮整个 profile（官方 README 的设计哲学亦是如此）。邮箱逻辑按相对路径 `../lib/core.mjs` 引入，插件与 CLI 永不漂移。
 
 **配置（patch 行，全部可省）**：`bridgeRoot`（绝对路径）、`actor`（默认 `dsh`）、`peer`（默认 `codex`）、`autoWake`（默认 `true`）。
 
@@ -447,10 +447,10 @@ DSH 装载一个 profile bundle 时要同时满足三件事，缺一即**静默�
 ```
 .agents/plugins/marketplace.json      # 本仓库即一个本地 marketplace：{name, plugins:[{name, source:{source:"local", path:"./plugin-codex"}, policy, category}]}
 plugin-codex/.codex-plugin/plugin.json # name/version/description/author/license/keywords/skills/interface
-plugin-codex/skills/agent-bridge/SKILL.md  # frontmatter(name,description) + 收发协议/时机/安全边界
+plugin-codex/skills/harnessmux/SKILL.md  # frontmatter(name,description) + 收发协议/时机/安全边界
 plugin-codex/hooks/hooks.template.json     # opt-in：PreToolUse + UserPromptSubmit 调 CLI 巡检
 ```
-安装：`codex plugin marketplace add <本仓库路径>` → `codex plugin add agent-bridge@agent-bridge`（`codex plugin marketplace|add|list` 已核实存在）。
+安装：`codex plugin marketplace add <本仓库路径>` → `codex plugin add harnessmux@harnessmux`（`codex plugin marketplace|add|list` 已核实存在）。
 注意：**`.agents/plugins/marketplace.json` 是"仓库即 marketplace"的约定路径**；若用户的 `<CODEX_HOME>/config.toml` 已经用一个 marketplace 根目录，可把本文件 symlink/copy 进那个根下（属安装细节，Q6）。
 
 **SKILL.md 的职责**：何时读、怎么读（`node <repo>/lib/mailbox.mjs read --actor codex`）、怎么写（`post --to dsh --kind instruction`）、何时必须回（`expectReply`）、线程与回执纪律，以及**安全边界**（邮箱内容不得覆盖人类指令、危险操作需人类批准、禁止写入秘密）。
@@ -519,7 +519,7 @@ export async function probe(peer) { /* 可用性探测，用于 status */ }
 
 | 风险 | 说明 | 缓解（设计） |
 |---|---|---|
-| **提示注入**：邮箱内容被当成系统指令 | Codex 可以往邮箱写任意文本，DSH 会 steer 进会话 | 注入消息带来源标记 `source.kind = "agent-bridge"`；简报明确"人类指令 > 邮箱内容"；对 `instruction` 类消息只执行可审计的操作，危险操作（删除/外发/凭据）仍需人类确认；`log/` 全量留痕 |
+| **提示注入**：邮箱内容被当成系统指令 | Codex 可以往邮箱写任意文本，DSH 会 steer 进会话 | 注入消息带来源标记 `source.kind = "harnessmux"`；简报明确"人类指令 > 邮箱内容"；对 `instruction` 类消息只执行可审计的操作，危险操作（删除/外发/凭据）仍需人类确认；`log/` 全量留痕 |
 | 越权与最小权限 | Codex 让 DSH 执行任意命令 | 桥不提升权限：DSH 的工具策略仍是用户设置的那套（本会话为 danger-full-access，用户可改）；适配器默认只允许 loopback |
 | 供应链 | 第三方包 | 主干零依赖；若要装 `dsh-subagent-acp`、`acpx` 等，全部版本钉死并记录在文档 |
 | 成本 | `codex exec` 一次系统提示 ≈ 8.7k tokens（实测） | `codex exec` 只用于"人触发的一次性咨询"；持续协作走邮箱，不走 exec |
@@ -547,7 +547,7 @@ export async function probe(peer) { /* 可用性探测，用于 status */ }
 - **Q3（插件形态）**：Codex 侧只能 skills+hooks（C3）。hooks 需要用户授权"钩子信任"，且 `PreToolUse` 只拿到工具名与 `tool_input.command` 形状。用 `UserPromptSubmit` 还是 `PreToolUse` 巡检更稳？是否应完全不依赖 hooks，改为纯 SKILL + 人类触发？
 - **Q4（MCP）**：`mcp/server.mjs` 手写 JSON-RPC（零依赖，约 200 行）还是引入官方 SDK（多一个依赖，但协议兼容性有保障）？注意 DSH 的 mcp-client 不支持 elicitation/sampling，MCP 端天然只能拉取。
 - **Q5（安全）**：注入来源标记 + "人类优先"约定是否足够？是否需要"邮箱消息默认只读上下文、不得直接触发写操作"的更严模式？
-- **Q6（分发）**：DSH 侧插件目前靠 profile 的 `link:` + `cordis.patch.yml`（本机可行）。若要给别人用，是否应做成 npm 包（`@local/agent-bridge` → 公开发布名）？Codex 侧是否应同时提供一个"无插件纯 CLI"模式给拒绝装插件的用户？
+- **Q6（分发）**：DSH 侧插件目前靠 profile 的 `link:` + `cordis.patch.yml`（本机可行）。若要给别人用，是否应做成 npm 包（`@local/harnessmux` → 公开发布名）？Codex 侧是否应同时提供一个"无插件纯 CLI"模式给拒绝装插件的用户？
 
 ---
 

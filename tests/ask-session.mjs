@@ -21,7 +21,7 @@
 import * as core from "../lib/core-v2.mjs";
 
 // Same resolution chain as the CLI: explicit env, then the remembered root.
-const ROOT = core.resolveBridgeRoot(process.env.AGENT_BRIDGE_DIR ?? undefined);
+const ROOT = core.resolveBridgeRoot(process.env.HARNESSMUX_DIR ?? undefined);
 const args = process.argv.slice(2);
 
 if (args.includes("--list")) {

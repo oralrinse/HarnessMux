@@ -3,7 +3,7 @@
  *
  * The harness refuses to mount a bundle whose package.json declares no
  * `dsh.bundle`, and it names the plugin twice: once as the bundle package
- * (`@local/agent-bridge`) and once as the patch row's plugin. This test guards
+ * (`@local/harnessmux`) and once as the patch row's plugin. This test guards
  * that contract, because importing `plugin/index.js` directly skips it.
  *
  * Run: node tests/manifest.test.mjs
@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 const REPO = join(import.meta.dirname, "..");
 const PLUGIN_DIR = join(REPO, "plugin");
-const BUNDLE_NAME = "@local/agent-bridge";
+const BUNDLE_NAME = "@local/harnessmux";
 
 const manifest = JSON.parse(readFileSync(join(PLUGIN_DIR, "package.json"), "utf8"));
 assert.equal(manifest.name, BUNDLE_NAME, "the plugin package name matches the patch row");
@@ -40,7 +40,7 @@ assert.equal(documents.includes("[]"), false, "the patch is not an empty sequenc
 
 // The plugin module must import cleanly from disk (no DSH package needed at load).
 const plugin = await import(new URL("./plugin/index.js", `file:///${REPO.replace(/\\/gu, "/")}/`).href);
-assert.equal(plugin.name, "agent-bridge", "the plugin module exports its cordis name");
+assert.equal(plugin.name, "harnessmux", "the plugin module exports its cordis name");
 assert.equal(typeof plugin.apply, "function", "the plugin module exports apply");
 assert.equal(typeof plugin.bridgeRoot, "function", "the plugin exports bridgeRoot for tests and tooling");
 

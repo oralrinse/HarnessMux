@@ -13,13 +13,13 @@ inferred from documentation.
 
 | Step | Result | Key evidence |
 |---|---|---|
-| Step 1 environment | PASS | Real bridge root from the profile config: `…/default-workspace/.agent-bridge` — `inbox`=1, `read`=2, `log`=3, `state`=1, `bridge.json` = `protocol: agent-bridge/v1`. Desktop running (pid 42312/42236, started 2026-10-04). No writer observed in two consecutive reads. |
-| Step 2 backup | PASS | `.agent-bridge.pre-v2-20261006` — file-set+content SHA-256 identical to the source: `1b6bb496194543bfb990f36266781ec6b35bfe13595df3a8b65536cff757359a` (8 files / 2769 bytes both sides). Backup verified before any write. |
+| Step 1 environment | PASS | Real bridge root from the profile config: `…/default-workspace/.harnessmux` — `inbox`=1, `read`=2, `log`=3, `state`=1, `bridge.json` = `protocol: harnessmux/v1`. Desktop running (pid 42312/42236, started 2026-10-04). No writer observed in two consecutive reads. |
+| Step 2 backup | PASS | `.harnessmux.pre-v2-20261006` — file-set+content SHA-256 identical to the source: `1b6bb496194543bfb990f36266781ec6b35bfe13595df3a8b65536cff757359a` (8 files / 2769 bytes both sides). Backup verified before any write. |
 | Step 3 dry-run | PASS | Independent conflict pre-check (`tests/v1-inventory.mjs`): 3 distinct messages, 0 conflicts, 0 unreadable. `migrate --dry-run`: `newMessages=3 newDeliveries=1 legacyConsumed=2 auditOnly=0`, and the target directory was **not created** (zero writes proven). |
-| Step 4 migrate | PASS | v2 root `…/default-workspace/.agent-bridge-v2`: `messages/`=3, `queue/`=1, `acks/`=**0**, `migration/v1-to-v2.json` written. v1 root still 8 files, untouched. |
+| Step 4 migrate | PASS | v2 root `…/default-workspace/.harnessmux-v2`: `messages/`=3, `queue/`=1, `acks/`=**0**, `migration/v1-to-v2.json` written. v1 root still 8 files, untouched. |
 | Step 5 verifyInvariants | PASS | `ok=true violations=[] pending=1 claimed=0 acked=0 awaitingBinding=["migrated-20261006090257478-84bd2f9e"]` |
 | Step 6 idempotency | PASS | Second run: `newMessages=0 newDeliveries=0 existingMessages=3 existingDeliveries=1`. Third run: `newMessages=0 newDeliveries=0`. File counts unchanged (messages 3, queue 1). |
-| Step 7 protocolVersion switch | PASS | `~/.dsh/profiles/desktop/cordis.patch.yml` and `…/acp/cordis.patch.yml` now carry `bridgeRoot: …/.agent-bridge-v2`, `protocolVersion: v2`, `endpointId: dsh-endpoint`. The v1 implementation, the v1 data, and the migration journal were all retained. No permissions changed, no Codex work started. |
+| Step 7 protocolVersion switch | PASS | `~/.dsh/profiles/desktop/cordis.patch.yml` and `…/acp/cordis.patch.yml` now carry `bridgeRoot: …/.harnessmux-v2`, `protocolVersion: v2`, `endpointId: dsh-endpoint`. The v1 implementation, the v1 data, and the migration journal were all retained. No permissions changed, no Codex work started. |
 
 **Migration rule compliance**
 
@@ -84,10 +84,10 @@ deliberately left unrouted. Neither is a violation.
 ### P1 — root cache was repointed at a deleted test directory
 
 - **Symptom**: at Step 1 the remembered bridge root resolved to
-  `…/agent-bridge/test-bridge-plugin-v2`, a directory that no longer existed, so
+  `…/harnessmux/test-bridge-plugin-v2`, a directory that no longer existed, so
   every CLI call without `--root` failed or silently looked at the wrong bridge.
-- **Evidence**: `~/.dsh/agent-bridge-root.txt` contained the test path while
-  `bridge.json` and the profile config pointed at `…/default-workspace/.agent-bridge`.
+- **Evidence**: `~/.dsh/harnessmux-root.txt` contained the test path while
+  `bridge.json` and the profile config pointed at `…/default-workspace/.harnessmux`.
 - **Root cause**: `ensureBridge()` wrote the root cache for *any* root, including
   throwaway test roots that the test then deleted.
 - **Fix**: `ensureBridge()` refuses to cache a root inside the project checkout
@@ -103,7 +103,7 @@ deliberately left unrouted. Neither is a violation.
 
 - **Symptom**: 4 bound deliveries sat `queued attempt=0` for two minutes with
   `claimed` permanently 0; `endpoints/` stayed empty.
-- **Evidence**: opt-in plugin trace (`AGENT_BRIDGE_DEBUG`) captured from a real
+- **Evidence**: opt-in plugin trace (`HARNESSMUX_DEBUG`) captured from a real
   ACP run: `registerV2Endpoint FAILED: cannot get property "agents" without inject`.
 - **Root cause**: two defects stacked. (a) The plugin declared
   `inject = ["tools", "systemPrompt"]` but the pump reads `ctx.agents`; Cordis
@@ -178,7 +178,7 @@ deliberately left unrouted. Neither is a violation.
 ### P7 — root cache was still reachable from implicit operations
 
 - **Symptom**: after fixing P1, a full `npm test` still moved
-  `~/.dsh/agent-bridge-root.txt` to a temp scenario directory.
+  `~/.dsh/harnessmux-root.txt` to a temp scenario directory.
 - **Evidence**: cache read before/after the suite differed; the earlier guard only
   covered `ensureBridge` called directly by the tests.
 - **Root cause**: every read/write helper (`postMessage`, `enqueueDelivery`,
@@ -218,7 +218,7 @@ state=acked  attempt=1     ← the pump claimed, steered and acked inside one ru
   `pendingTotal: 2, logTotal: 2`, and the model told the user it had two messages
   to read from codex — while the v2 bridge had no delivery addressed to that session.
 - **Evidence**: the v2 root contained v1-style `inbox/` (2 files), `log/` (2 files)
-  and `state/`, written by the plugin **after** the cutover; `agent-bridge-v2 status`
+  and `state/`, written by the plugin **after** the cutover; `harnessmux-v2 status`
   showed a different truth (`messages=7 queued=3 acked=2`).
 - **Root cause**: the tool's `execute` handler called `mailboxV1.*` for every action
   regardless of `protocolVersion`; only the wake path honoured the switch. The result
@@ -262,8 +262,8 @@ state=acked  attempt=1     ← the pump claimed, steered and acked inside one ru
     makes the whole session unreadable;
   - the damage is visible in the projection caches: five sessions (`504e525f…`,
     `82122571…`, `8ca4a2ef…`, `d81d99e7…`, `session-4783dcdc…`) store an
-    `agent-bridge` user message with `id = undefined`;
-  - a full-text scan of all 69 stored logs found the `agent-bridge` marker in **no**
+    `harnessmux` user message with `id = undefined`;
+  - a full-text scan of all 69 stored logs found the `harnessmux` marker in **no**
     log, so the projection caches are the usable evidence (see P11).
 - **Fix** (present in `plugin/index.js`): the fallback mints `id: randomUUID()`, so
   both the `dsh-llm` path and the fallback emit an identified message. Exactly one
@@ -274,7 +274,7 @@ state=acked  attempt=1     ← the pump claimed, steered and acked inside one ru
   report was typed in).
 - **Regression test**: `tests/plugin.test.mjs` now asserts for every injected and
   steered message that `id` is a non-empty string, `role === "user"`, and
-  `source.kind === "agent-bridge"` — deliberately not trusting the import, since the
+  `source.kind === "harnessmux"` — deliberately not trusting the import, since the
   fallback is the production path.
 
 ### P11 — session logs are multi-frame zstd, and both standard decoders hide it

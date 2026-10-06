@@ -98,7 +98,7 @@ if (only) {
 	console.log(`${only}: ${lines.length} events in ${frames} zstd frames`);
 	let bridge = 0;
 	for (const line of lines) {
-		if (!line.includes("agent-bridge")) continue;
+		if (!line.includes("harnessmux")) continue;
 		let event;
 		try {
 			event = JSON.parse(line);
@@ -110,7 +110,7 @@ if (only) {
 		const id = event.data?.id;
 		console.log(`  seq ${event.seq} source=${event.data?.source?.kind} id=${JSON.stringify(id)} ${typeof id === "string" && id.length > 0 ? "OK" : "*** MISSING ID ***"}`);
 	}
-	console.log(`agent-bridge user/message events: ${bridge}`);
+	console.log(`harnessmux user/message events: ${bridge}`);
 	process.exit(0);
 }
 
@@ -129,7 +129,7 @@ for (const entry of sessionFiles()) {
 		let missing = 0;
 		let firstBridgeSeq = null;
 		for (const line of lines) {
-			if (!line.includes("agent-bridge")) continue;
+			if (!line.includes("harnessmux")) continue;
 			let event;
 			try {
 				event = JSON.parse(line);
@@ -153,15 +153,15 @@ for (const entry of sessionFiles()) {
 
 console.log(`sessions scanned      : ${sessionFiles().length}`);
 console.log(`events decoded        : ${totalEvents}`);
-console.log(`agent-bridge messages : ${totalBridge} across ${bridgeSessions.length} sessions`);
+console.log(`harnessmux messages : ${totalBridge} across ${bridgeSessions.length} sessions`);
 console.log(`  of those, missing id: ${totalMissing}`);
 console.log(`unreadable files      : ${results.length}`);
 for (const row of results) console.log(`  ! ${row.session}: ${row.error}`);
-console.log("\nsessions containing agent-bridge deliveries:");
+console.log("\nsessions containing harnessmux deliveries:");
 for (const row of bridgeSessions.sort((a, b) => b.bridge - a.bridge).slice(0, 20)) {
 	console.log(`  ${row.session}  events=${row.bridge}  missingId=${row.missing}  firstSeq=${row.firstBridgeSeq}  frames=${row.frames}`);
 }
 if (broken.length > 0) {
-	console.log("\n*** sessions with an id-less agent-bridge event (these are the corrupt ones) ***");
+	console.log("\n*** sessions with an id-less harnessmux event (these are the corrupt ones) ***");
 	for (const row of broken) console.log(`  ${row.session}  missing=${row.missing}`);
 }

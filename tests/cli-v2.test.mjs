@@ -48,7 +48,7 @@ mkdirSync(ROOT, { recursive: true });
 // --- init and policy ------------------------------------------------------------
 const init = cli("init");
 assert.equal(init.code, 0, "init succeeds");
-assert.match(init.stdout, /agent-bridge v2 ready/u);
+assert.match(init.stdout, /harnessmux v2 ready/u);
 const policy = json("policy", "--lease-ms", "5000", "--mode", "advisory", "--audit-retention-days", "7");
 assert.equal(policy.leaseMs, 5000, "policy sets the lease");
 assert.equal(policy.audit.retentionDays, 7, "policy sets audit retention");
