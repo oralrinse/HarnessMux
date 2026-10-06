@@ -188,6 +188,31 @@ The adapter is built and installed, and every offline condition is verified:
 Not yet verified, because it needs a model: **D1–D6**. The acceptance script for that is
 `examples/live/claude-acceptance.mjs`; it prints one PASS/FAIL line per condition and writes
 its evidence to `.claude-acceptance/`.
+## P3.3-C, first attempt (2026-10-06): 3 passes, 1 probe defect, 1 real defect
+
+The user ran `node examples/live/claude-acceptance.mjs` in an authenticated shell.
+Result as reported by the script: setup PASS, D4 PASS, D5 PASS, D6 PASS, **D1/D2/D3 FAIL**.
+
+Reading the evidence rather than the verdicts:
+
+- **D1/D2 were my probe's fault, not the adapter's.** The captured output contains the
+  `get_status` payload verbatim (`"version":2 … "invariantsOk":true`), so Claude did call the
+  shared MCP server. The check was looking for the CLI's prose line `protocol: v2`, which an
+  MCP tool never returns because it answers with structured JSON. Fixed: D1 now looks for the
+  call, D2 for the server's payload keys.
+- **D3 was a target-selection failure.** The script took `sessions[0]` from the published
+  endpoint, which named a session that had stopped 50 minutes earlier; the delivery stayed
+  queued by design because a stopped session is not a running one. The trace proves the
+  receiver behaved correctly and was serving a *different* session. Fixed: the script now
+  confirms the publication is fresh (see `DEFECT-stale-endpoint.md`) and accepts
+  `--target-session`.
+- **D4/D5/D6 passed as written**, including the one that mattered most: the model quoted the
+  marker the hook injected, so `hookSpecificOutput.additionalContext` really does reach
+  Claude's context. That is D4, measured.
+
+So of the three reported failures, two were measurement bugs in my own probe. That is worth
+recording plainly: the acceptance script is part of the system under test, and a wrong
+verdict hides a working path just as effectively as a wrong PASS hides a broken one.
 ## Blocker: a headless Claude session cannot authenticate
 
 `claude -p "…"` fails before the model is reached:

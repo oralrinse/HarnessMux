@@ -26,7 +26,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,40 +90,88 @@ if (!core.isBridgeRoot(bridge)) {
 	process.exit(1);
 }
 
+/**
+ * The session to deliver to, chosen from evidence rather than from list order.
+ *
+ * A published endpoint can carry sessions that are no longer running: the first
+ * acceptance run picked `sessions[0]` and addressed a session that had been gone for 50
+ * minutes, so its delivery sat queued forever and D3 was reported as a failure of the
+ * adapter when it was a failure of target selection. A delivery to a dead session is
+ * indistinguishable from a delivery to an idle one, so the script refuses to guess:
+ *
+ *   - `--target-session <id>` states it outright (use the session you are looking at);
+ *   - otherwise every candidate must be confirmed by the harness publishing it *now*.
+ *
+ * "Now" is judged from the endpoint file's own modification time: the receiver rewrites
+ * it whenever its live session set changes, so a file untouched for a long time means no
+ * session is actually live, whatever the stored list says.
+ */
+function pickTargetSession(endpoint) {
+	const explicit = process.argv.find((arg) => arg.startsWith("--target-session="))?.split("=")[1]
+		?? (process.argv.includes("--target-session") ? process.argv[process.argv.indexOf("--target-session") + 1] : null);
+	if (explicit) return { session: explicit, how: "stated with --target-session" };
+	return { session: endpoint?.sessions?.[0] ?? null, how: "first published session" };
+}
+
 const endpoint = core.listEndpoints(bridge).find((entry) => entry.actor === PEER);
-const sessions = endpoint?.sessions ?? [];
-if (sessions.length === 0) {
-	say("FATAL: no live DeepSeek Harness session is published.");
-	say("       open a DSH session and send it one message so it stays running, then retry.");
+const published = endpoint?.sessions ?? [];
+if (published.length === 0) {
+	say("FATAL: no DeepSeek Harness session is published at all.");
+	say("       Open a DSH session and keep it running, then retry.");
 	process.exit(1);
 }
-// The DSH session that must NOT receive anything: any other live session, else a fake
+
+const endpointFile = join(bridge, "endpoints", `${endpoint.endpointId}.json`);
+const endpointAgeMs = existsSync(endpointFile) ? Date.now() - statSync(endpointFile).mtimeMs : Number.POSITIVE_INFINITY;
+const picked = pickTargetSession(endpoint);
+const ageSeconds = Math.round(endpointAgeMs / 1000);
+say(`published sessions : ${JSON.stringify(published)}`);
+say(`endpoint refreshed : ${ageSeconds}s ago (${new Date(Date.now() - endpointAgeMs).toISOString()})`);
+
+// A delivery is only attempted into a *running* session, so a stale publication means the
+// target cannot be confirmed and the run would produce a meaningless D3.
+if (picked.how !== "stated with --target-session" && endpointAgeMs > 120_000) {
+	say("");
+	say(`FATAL: the harness has not republished its live sessions for ${ageSeconds}s, so none of the`);
+	say("       published sessions can be confirmed as running, and a delivery to a stopped");
+	say("       session would wait forever — that is the documented idle boundary, not a bug.");
+	say("");
+	say("       Fix: keep a DSH session running (send it a message so it is mid-turn), or state");
+	say("       the target explicitly, e.g.");
+	say("         node examples/live/claude-acceptance.mjs --target-session <sessionId>");
+	process.exit(2);
+}
+
+const targetSession = picked.session;
+// The DSH session that must NOT receive anything: any other published session, else a fake
 // endpoint registered for this run so the isolation check still has a second target.
-const targetSession = sessions[0];
-let decoySession = sessions[1] ?? "decoy-session-not-live";
-if (sessions.length < 2) {
+let decoySession = published.find((id) => id !== targetSession) ?? "decoy-session-not-live";
+if (!published.some((id) => id !== targetSession)) {
 	core.registerEndpoint(bridge, { actor: PEER, endpointId: "dsh-decoy-endpoint", sessions: [decoySession] });
 }
-record("setup", true, `plugin at ${pluginPath}; live sessions=${JSON.stringify(sessions)}; target=${targetSession}`, "the adapter can be exercised");
+record("setup", true, `plugin at ${pluginPath}; published=${JSON.stringify(published)}; target=${targetSession} (${picked.how}); endpoint refreshed ${ageSeconds}s ago`, "the adapter can be exercised against a target chosen from evidence");
 
 // --- D1/D2: Claude sees and calls the shared MCP server -------------------------
 const statusRun = claude(
 	"Call the harnessmux MCP tool `get_status` and then print its result verbatim between the lines BEGIN and END. Do not use any other tool and do not explain."
 );
 const statusText = statusRun.output;
-const sawTool = /mcp[:_ ]*harnessmux|harnessmux.*get_status|get_status/iu.test(statusText);
-const sawV2 = /protocol:\s*v2/iu.test(statusText);
+// The MCP tool returns structured JSON, so the protocol marker is a JSON key here, not the
+// CLI's prose line. The first acceptance run checked only for `protocol: v2` and reported a
+// failure while the evidence it captured contained the full, correct get_status payload.
+const sawMcpCall = /get_status/iu.test(statusText);
+const sawServerOutput = /"invariantsOk"\s*:\s*true/u.test(statusText) || /"version"\s*:\s*2/u.test(statusText) || /protocol:\s*v2/iu.test(statusText);
 record(
 	"D1 Claude lists the HarnessMux MCP tools",
-	sawTool,
-	`claude output mentions the tool: ${sawTool}`,
+	sawMcpCall,
+	`the run shows the tool being called: ${sawMcpCall}`,
 	"Claude discovered the server this adapter declares"
 );
 record(
 	"D2 Claude calls the shared MCP server",
-	sawV2,
-	`get_status answered with the protocol line: ${sawV2}${sawV2 ? "" : ` (tail: ${statusText.slice(-300).replace(/\s+/gu, " ")})`}`,
-	"the reply is the shared server's own output, not a legacy path"
+	sawServerOutput,
+	`get_status returned the shared server's own payload: ${sawServerOutput}${sawServerOutput ? "" : ` (tail: ${statusText.slice(-300).replace(/\s+/gu, " ")})`}`,
+	"the reply is the shared server's structured output, not a legacy path"
 );
 writeFileSync(join(OUT, "d1-d2-get-status.txt"), statusText, "utf8");
 

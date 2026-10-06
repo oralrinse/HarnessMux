@@ -7,3 +7,6 @@ examples/demo-bridge/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Live acceptance output (contains machine paths and session ids)
+.claude-acceptance/
