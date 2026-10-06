@@ -20,7 +20,7 @@ process.env.HARNESSMUX_DIR = ROOT;
 rmSync(ROOT, { recursive: true, force: true });
 mkdirSync(ROOT, { recursive: true });
 
-const core = await import("../lib/core.mjs");
+const core = await import("../packages/core/core.mjs");
 core.ensureBridge(ROOT);
 core.postMessage(ROOT, { from: "codex", to: "dsh", topic: "wake me", kind: "instruction", body: "run the build and report back", expectReply: true });
 
@@ -64,7 +64,7 @@ function mockContext() {
 	};
 }
 
-const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "plugin", "index.js")).href);
+const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "packages", "receiver-dsh", "index.js")).href);
 const mock = mockContext();
 plugin.apply(mock.ctx, { bridgeRoot: ROOT, actor: "dsh", peer: "codex", autoWake: false });
 

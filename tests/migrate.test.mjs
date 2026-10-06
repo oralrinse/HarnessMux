@@ -16,11 +16,11 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { migrate, readJournal } from "../lib/migrate.mjs";
-import { listDeliveries, listMessages, verifyInvariants } from "../lib/core-v2.mjs";
+import { migrate, readJournal } from "../packages/core/migrate.mjs";
+import { listDeliveries, listMessages, verifyInvariants } from "../packages/core/core-v2.mjs";
 
-const V1_CLI = join(import.meta.dirname, "..", "lib", "mailbox.mjs");
-const V2_CLI = join(import.meta.dirname, "..", "lib", "mailbox-v2.mjs");
+const V1_CLI = join(import.meta.dirname, "..", "packages", "cli", "mailbox.mjs");
+const V2_CLI = join(import.meta.dirname, "..", "packages", "cli", "mailbox-v2.mjs");
 const BASE = join(import.meta.dirname, "..", "test-bridge-migrate");
 const V1 = join(BASE, "v1");
 const V2 = join(BASE, "v2");

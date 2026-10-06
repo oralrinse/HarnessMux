@@ -45,8 +45,8 @@ import {
 	resolveBridgeRoot,
 	verifyInvariants,
 	writeManifest
-} from "./core-v2.mjs";
-import { migrate as migrateV1 } from "./migrate.mjs";
+} from "../core/core-v2.mjs";
+import { migrate as migrateV1 } from "../core/migrate.mjs";
 
 /** Switches whose whole name is the flag (`--no-deliver` is not "deliver: false"). */
 const BOOLEAN_FLAGS = new Set(["no-deliver", "no-route", "unrouted", "allow-unrouted", "json", "help"]);

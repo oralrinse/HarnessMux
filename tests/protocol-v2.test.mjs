@@ -30,7 +30,7 @@ import {
 	releaseDelivery,
 	verifyInvariants,
 	writeManifest
-} from "../lib/core-v2.mjs";
+} from "../packages/core/core-v2.mjs";
 
 const ROOT = join(import.meta.dirname, "..", "test-bridge-v2");
 /**

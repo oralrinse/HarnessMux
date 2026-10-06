@@ -28,10 +28,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import * as core from "../lib/core-v2.mjs";
+import * as core from "../../packages/core/core-v2.mjs";
 
 const LEASE_MS = 6_000;
-const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "plugin", "index.js")).href);
+const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "..", "packages", "receiver-dsh", "index.js")).href);
 
 /**
  * Build one isolated scenario: its own root, endpoint, session, trace, and mount.

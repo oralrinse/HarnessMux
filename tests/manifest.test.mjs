@@ -4,7 +4,7 @@
  * The harness refuses to mount a bundle whose package.json declares no
  * `dsh.bundle`, and it names the plugin twice: once as the bundle package
  * (`@local/harnessmux`) and once as the patch row's plugin. This test guards
- * that contract, because importing `plugin/index.js` directly skips it.
+ * that contract, because importing `packages/receiver-dsh/index.js` directly skips it.
  *
  * Run: node tests/manifest.test.mjs
  */
@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO = join(import.meta.dirname, "..");
-const PLUGIN_DIR = join(REPO, "plugin");
+const PLUGIN_DIR = join(REPO, "packages", "receiver-dsh");
 const BUNDLE_NAME = "@local/harnessmux";
 
 const manifest = JSON.parse(readFileSync(join(PLUGIN_DIR, "package.json"), "utf8"));
@@ -39,7 +39,7 @@ assert.equal(documents.includes("---"), false, "the patch is one YAML document, 
 assert.equal(documents.includes("[]"), false, "the patch is not an empty sequence with rows appended after it");
 
 // The plugin module must import cleanly from disk (no DSH package needed at load).
-const plugin = await import(new URL("./plugin/index.js", `file:///${REPO.replace(/\\/gu, "/")}/`).href);
+const plugin = await import(new URL("packages/receiver-dsh/index.js", `file:///${REPO.replace(/\\/gu, "/")}/`).href);
 assert.equal(plugin.name, "harnessmux", "the plugin module exports its cordis name");
 assert.equal(typeof plugin.apply, "function", "the plugin module exports apply");
 assert.equal(typeof plugin.bridgeRoot, "function", "the plugin exports bridgeRoot for tests and tooling");
@@ -48,8 +48,8 @@ assert.equal(typeof plugin.bridgeRoot, "function", "the plugin exports bridgeRoo
 // A test run overwrote the cache with a test-bridge path that it then deleted,
 // which broke the first real cutover's root resolution.
 {
-	const { ROOT_CACHE: CACHE_V1, ensureBridge: ensureV1 } = await import("../lib/core.mjs");
-	const { ROOT_CACHE: CACHE_V2, ensureBridge: ensureV2 } = await import("../lib/core-v2.mjs");
+	const { ROOT_CACHE: CACHE_V1, ensureBridge: ensureV1 } = await import("../packages/core/core.mjs");
+	const { ROOT_CACHE: CACHE_V2, ensureBridge: ensureV2 } = await import("../packages/core/core-v2.mjs");
 	assert.equal(CACHE_V1, CACHE_V2, "v1 and v2 share one remembered-root cache");
 
 	// This test writes the shared cache, so it must restore the real value.
@@ -72,7 +72,7 @@ assert.equal(typeof plugin.bridgeRoot, "function", "the plugin exports bridgeRoo
 
 		// Implicit operations must never touch the cache: a long-running participant
 		// (or a test) that merely posts/claims/acks used to repoint the user's root.
-		const { postMessage, enqueueDelivery, claimDelivery, ackDelivery, registerEndpoint } = await import("../lib/core-v2.mjs");
+		const { postMessage, enqueueDelivery, claimDelivery, ackDelivery, registerEndpoint } = await import("../packages/core/core-v2.mjs");
 		const implicit = mkdtempSync(join(tmpdir(), "ab-implicit-"));
 		writeFileSync(CACHE_V1, sentinel, "utf8");
 		const message = postMessage(implicit, { from: "codex", topic: "cache guard", body: "must not touch the cache" });

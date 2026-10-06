@@ -130,10 +130,14 @@ export function ensureBridge(root, options = {}) {
  * @returns {boolean} true when the root must not be cached.
  */
 function isEphemeralRoot(root) {
-	const moduleRoot = dirname(fileURLToPath(import.meta.url));
-	const projectRoot = dirname(moduleRoot);
+	// This module is packages/core/core-v2.mjs, so the project root is three levels
+	// up: file -> packages/core -> packages -> repo. `resolve()` normalises the
+	// Windows drive letter on both sides, because `fileURLToPath` yields "h:\…" while
+	// callers pass "H:\…" and a raw comparison silently misses.
+	const modulePath = resolve(fileURLToPath(import.meta.url));
+	const projectRoot = dirname(dirname(dirname(modulePath)));
 	const normalized = resolve(root);
-	return normalized.startsWith(`${resolve(projectRoot)}${sep}`) || normalized === resolve(projectRoot);
+	return normalized === projectRoot || normalized.startsWith(`${projectRoot}${sep}`);
 }
 
 /** Read the manifest with defaults filled in. */

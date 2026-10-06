@@ -37,7 +37,7 @@ import {
 	rememberRoot,
 	resolveBridgeRoot,
 	setCursor
-} from "./core.mjs";
+} from "../core/core.mjs";
 
 /**
  * Parse `--key value`, `--flag`, and positional arguments.

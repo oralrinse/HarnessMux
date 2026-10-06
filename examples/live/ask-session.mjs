@@ -18,7 +18,7 @@
  * it means the session never ran), 1 usage/setup error.
  */
 
-import * as core from "../lib/core-v2.mjs";
+import * as core from "../../packages/core/core-v2.mjs";
 
 // Same resolution chain as the CLI: explicit env, then the remembered root.
 const ROOT = core.resolveBridgeRoot(process.env.HARNESSMUX_DIR ?? undefined);

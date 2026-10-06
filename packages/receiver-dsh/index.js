@@ -82,14 +82,14 @@ let DEBUG_PATH = process.env.HARNESSMUX_DEBUG?.trim() ?? "";
 /** This module's directory, used to reach the mailbox library. */
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-/** Repository root (one level above `plugin/`). */
-const REPO_ROOT = resolve(HERE, "..");
+/** Repository root (two levels above `packages/receiver-dsh/`). */
+const REPO_ROOT = resolve(HERE, "..", "..");
 
 /** The v1 mailbox library; the CLI imports the same file. */
-const CORE_V1_URL = pathToFileURL(join(REPO_ROOT, "lib", "core.mjs")).href;
+const CORE_V1_URL = pathToFileURL(join(REPO_ROOT, "packages", "core", "core.mjs")).href;
 
 /** The v2 core (messages + deliveries). */
-const CORE_V2_URL = pathToFileURL(join(REPO_ROOT, "lib", "core-v2.mjs")).href;
+const CORE_V2_URL = pathToFileURL(join(REPO_ROOT, "packages", "core", "core-v2.mjs")).href;
 
 /** File that remembers the user's chosen bridge root. */
 const ROOT_CACHE = join(homedir(), ".dsh", "harnessmux-root.txt");

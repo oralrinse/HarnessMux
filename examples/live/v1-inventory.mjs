@@ -11,7 +11,7 @@
 
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { collectV1, resolveCopies } from "../lib/migrate.mjs";
+import { collectV1, resolveCopies } from "../../packages/core/migrate.mjs";
 
 const root = process.argv[2];
 if (!root) {

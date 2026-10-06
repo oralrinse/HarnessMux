@@ -23,10 +23,10 @@ import {
 	readMessages,
 	resolveBridgeRoot,
 	setCursor
-} from "../lib/core.mjs";
+} from "../packages/core/core.mjs";
 
 const ROOT = join(import.meta.dirname, "..", "test-bridge");
-const CLI = join(import.meta.dirname, "..", "lib", "mailbox.mjs");
+const CLI = join(import.meta.dirname, "..", "packages", "cli", "mailbox.mjs");
 
 /** Run the CLI against the test bridge. */
 function cli(...args) {

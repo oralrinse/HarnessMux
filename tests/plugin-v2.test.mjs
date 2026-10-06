@@ -20,7 +20,7 @@ process.env.HARNESSMUX_DIR = ROOT;
 rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 mkdirSync(ROOT, { recursive: true });
 
-const core = await import("../lib/core-v2.mjs");
+const core = await import("../packages/core/core-v2.mjs");
 core.ensureBridge(ROOT);
 core.registerEndpoint(ROOT, { actor: "dsh", endpointId: "dsh-endpoint", transport: "in-process", sessions: ["session-1", "session-2"] });
 
@@ -67,7 +67,7 @@ function mockContext(options = {}) {
 	};
 }
 
-const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "plugin", "index.js")).href);
+const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "packages", "receiver-dsh", "index.js")).href);
 /** Wait for the plugin's watcher to fire. */
 const waitUntil = async (predicate, timeoutMs = 20_000) => {
 	const started = Date.now();

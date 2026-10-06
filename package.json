@@ -24,29 +24,30 @@
     "node": ">=22"
   },
   "bin": {
-    "harnessmux": "lib/mailbox.mjs",
-    "harnessmux-v2": "lib/mailbox-v2.mjs"
+    "harnessmux": "packages/cli/mailbox.mjs",
+    "harnessmux-v2": "packages/cli/mailbox-v2.mjs"
   },
   "exports": {
-    ".": "./lib/core.mjs",
-    "./v2": "./lib/core-v2.mjs",
-    "./plugin": "./plugin/index.js"
+    ".": "./packages/core/core.mjs",
+    "./v2": "./packages/core/core-v2.mjs",
+    "./receiver-dsh": "./packages/receiver-dsh/index.js"
   },
   "files": [
-    "lib",
-    "plugin",
+    "packages",
     "docs",
     "examples",
     "scripts",
+    "tools",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node tests/mailbox.test.mjs && node tests/protocol-v2.test.mjs && node tests/cli-v2.test.mjs && node tests/migrate.test.mjs && node tests/manifest.test.mjs && node tests/plugin.test.mjs && node tests/plugin-v2.test.mjs && node tests/cutover-faults.test.mjs",
-    "test:live": "node tests/cutover-probe.mjs",
-    "test:probes": "node tests/acp-live-probe.mjs && node tests/acp-wake-probe.mjs",
-    "inventory": "node tests/v1-inventory.mjs",
-    "demo": "node examples/demo.mjs"
+    "test": "node tests/mailbox.test.mjs && node tests/protocol-v2.test.mjs && node tests/cli-v2.test.mjs && node tests/migrate.test.mjs && node tests/manifest.test.mjs && node tests/plugin.test.mjs && node tests/plugin-v2.test.mjs && node examples/live/cutover-faults.test.mjs",
+    "test:live": "node examples/live/cutover-probe.mjs",
+    "test:probes": "node examples/live/acp-live-probe.mjs && node examples/live/acp-wake-probe.mjs",
+    "inventory": "node examples/live/v1-inventory.mjs",
+    "relink": "node tools/relink.mjs"
   },
   "private": false
 }

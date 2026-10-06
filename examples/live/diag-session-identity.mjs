@@ -21,7 +21,7 @@ requireDsh();
 const COMSPEC = process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe";
 
 const seen = [];
-const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "plugin", "index.js")).href);
+const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "..", "packages", "receiver-dsh", "index.js")).href);
 
 // Probe the plugin's own view: mount it inside this process with a fake "root"
 // agent that mirrors what a real agent object looks like, and print what the

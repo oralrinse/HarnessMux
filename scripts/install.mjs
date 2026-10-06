@@ -21,15 +21,15 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..");
-/** The DSH host plugin is its own package inside the repository. */
-const PLUGIN_DIR = join(REPO_ROOT, "plugin");
+/** The DSH receiver is its own package inside the monorepo. */
+const PLUGIN_DIR = join(REPO_ROOT, "packages", "receiver-dsh");
 const PACKAGE_NAME = "@local/harnessmux";
 
 /**
@@ -127,7 +127,7 @@ const dir = profileDir(profile);
 const MANUAL = `Manual setup (equivalent to what this script does):
 
 1. Create the mailbox:
-     node "${join(REPO_ROOT, "lib", "mailbox.mjs")}" init --root "${bridge}"
+     node "${join(REPO_ROOT, "packages", "cli", "mailbox.mjs")}" init --root "${bridge}"
 
 2. In ${dir}\\package.json:
      - add to "dependencies":  "${PACKAGE_NAME}": "link:${PLUGIN_DIR.replace(/\\/gu, "/")}"
@@ -162,7 +162,7 @@ if (!existsSync(dir)) {
 
 // 1. mailbox
 if (!dryRun) {
-	const { ensureBridge } = await import(new URL("../lib/core.mjs", import.meta.url).href);
+	const { ensureBridge } = await import(new URL("../packages/core/core.mjs", import.meta.url).href);
 	ensureBridge(bridge);
 }
 process.stdout.write(`${dryRun ? "[dry-run] " : ""}mailbox ready at ${bridge}\n`);
@@ -176,10 +176,40 @@ manifest.dsh.profile ??= {};
 manifest.dsh.profile.bundles ??= [];
 const linkSpec = `link:${PLUGIN_DIR.replace(/\\/gu, "/")}`;
 const previousSpec = manifest.dependencies[PACKAGE_NAME];
+
+/**
+ * Does the installed symlink resolve to this package?
+ *
+ * Comparing `package.json` alone is not enough: after a directory move the spec can
+ * already be correct while `node_modules` still holds a link to the old path — a
+ * silently broken bundle that the harness only reports much later as
+ * "failed to import". The real link is therefore inspected, and a stale one is
+ * removed so the install actually rebuilds it (pnpm keeps an existing link when the
+ * spec itself is unchanged, even under --force).
+ *
+ * @returns {{stale: boolean, target: string|null}} link state.
+ */
+function inspectLink() {
+	const linkPath = join(dir, "node_modules", "@local", PACKAGE_NAME.split("/")[1]);
+	if (!existsSync(linkPath)) return { stale: true, target: null };
+	try {
+		const target = realpathSync(linkPath);
+		return { stale: resolve(target) !== resolve(PLUGIN_DIR), target };
+	} catch {
+		return { stale: true, target: null };
+	}
+}
+
+const link = inspectLink();
 const dependencyChanged = previousSpec !== linkSpec;
-// pnpm keeps an existing link when only its target changed, so retargeting needs --force.
-const retargeted = dependencyChanged && typeof previousSpec === "string";
+const retargeted = dependencyChanged || link.stale;
 const bundleChanged = !manifest.dsh.profile.bundles.includes(PACKAGE_NAME);
+if (dependencyChanged) manifest.dependencies[PACKAGE_NAME] = linkSpec;
+if (bundleChanged) manifest.dsh.profile.bundles.push(PACKAGE_NAME);
+if (retargeted && !dryRun && link.target !== null) {
+	// Remove the stale link before installing, so pnpm has to recreate it.
+	rmSync(join(dir, "node_modules", "@local", PACKAGE_NAME.split("/")[1]), { recursive: true, force: true });
+}
 if (dependencyChanged) manifest.dependencies[PACKAGE_NAME] = linkSpec;
 if (bundleChanged) manifest.dsh.profile.bundles.push(PACKAGE_NAME);
 if (dependencyChanged || bundleChanged) {
@@ -247,4 +277,4 @@ if (!dryRun) {
 	}
 }
 
-process.stdout.write(`\nNext: restart the harness so the plugin mounts (a profile reload also works: \`${dshCommand()}\` from the profile).\nThen verify:\n  node "${join(REPO_ROOT, "lib", "mailbox.mjs")}" status\n  and ask the agent to run \`mailbox action=status\`.\n`);
+process.stdout.write(`\nNext: restart the harness so the plugin mounts (a profile reload also works: \`${dshCommand()}\` from the profile).\nThen verify:\n  node "${join(REPO_ROOT, "packages", "cli", "mailbox.mjs")}" status\n  and ask the agent to run \`mailbox action=status\`.\n`);

@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-const CLI = join(import.meta.dirname, "..", "lib", "mailbox-v2.mjs");
+const CLI = join(import.meta.dirname, "..", "packages", "cli", "mailbox-v2.mjs");
 const ROOT = join(import.meta.dirname, "..", "test-bridge-v2-cli");
 
 /**

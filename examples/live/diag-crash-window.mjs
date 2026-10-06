@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import * as core from "../lib/core-v2.mjs";
+import * as core from "../../packages/core/core-v2.mjs";
 
 const ROOT = mkdtempSync(join(tmpdir(), "ab-trace-"));
 const ENDPOINT = "ep-trace";
@@ -22,7 +22,7 @@ const SENTINEL = join(ROOT, "crash.sentinel");
 
 core.ensureBridge(ROOT, { remember: false });
 core.registerEndpoint(ROOT, { actor: "dsh", endpointId: ENDPOINT, transport: "in-process", sessions: [SESSION] });
-const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "plugin", "index.js")).href);
+const plugin = await import(pathToFileURL(join(import.meta.dirname, "..", "..", "packages", "receiver-dsh", "index.js")).href);
 const t0 = Date.now();
 const log = (line) => console.log(`${String(Date.now() - t0).padStart(6)}ms  ${line}`);
 

@@ -19,7 +19,7 @@
 
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import * as core from "../lib/core-v2.mjs";
+import * as core from "../../packages/core/core-v2.mjs";
 import { BRIDGE_ROOT, CWD, DSH, requireDsh } from "./env.mjs";
 
 const TIMEOUT_MS = Number(process.argv[2] ?? 240_000);
