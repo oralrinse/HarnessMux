@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"H:/PersonalComputerSoftware/Code/repository/agent-bridge/lib/mailbox.mjs\" read --actor codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"H:/PersonalComputerSoftware/Code/repository/agent-bridge/lib/mailbox.mjs\" read --actor codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

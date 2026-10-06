@@ -1,0 +1,17 @@
+{
+  "name": "agent-bridge",
+  "plugins": [
+    {
+      "name": "agent-bridge",
+      "source": {
+        "source": "local",
+        "path": "./plugin-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

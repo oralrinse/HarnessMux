@@ -1,0 +1,15 @@
+{
+  "name": "@local/agent-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH host plugin for the agent-bridge mailbox: a model-facing mailbox tool, a session briefing, and auto-wake on unread peer messages",
+  "exports": {
+    ".": "./index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

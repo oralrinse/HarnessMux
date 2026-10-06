@@ -1,0 +1,47 @@
+#!/bin/sh
+# Pre-commit guard for a repository that is meant to be public.
+#
+# Two classes of mistake are cheap to make and expensive to publish, because a git
+# history is forever: an absolute path from the author's machine, and a credential.
+# Both are checked against the staged content (not the working tree), so a fix in a
+# later commit does not retroactively hide what is already staged.
+#
+# Install once per clone:   sh scripts/install-hooks.sh
+# Bypass deliberately:      git commit --no-verify
+
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+problems=0
+
+# 1. Absolute author paths (the project resolves hosts from env vars instead).
+local_paths='C:\\Users\\[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+|[A-Z]:\\\\PersonalComputerSoftware'
+for file in $staged; do
+  case "$file" in
+    *.png|*.jpg|*.jpeg|*.gif|*.ico|*.zip|*.zst|*.zstd|*.exe|*.node) continue ;;
+  esac
+  if git show ":$file" 2>/dev/null | grep -nEq "$local_paths"; then
+    echo "pre-commit: $file contains an absolute path from a developer machine" >&2
+    git show ":$file" | grep -nE "$local_paths" | head -5 | sed 's/^/    /' >&2
+    problems=1
+  fi
+done
+
+# 2. Credentials and keys.
+secrets='gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[A-Za-z0-9-]{10,}'
+for file in $staged; do
+  if git show ":$file" 2>/dev/null | grep -nEq "$secrets"; then
+    echo "pre-commit: $file looks like it contains a credential" >&2
+    problems=1
+  fi
+done
+
+if [ "$problems" -ne 0 ]; then
+  echo "" >&2
+  echo "Commit blocked. Fix the file, or use 'git commit --no-verify' if this is a false positive." >&2
+  exit 1
+fi
+
+exit 0

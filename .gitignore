@@ -1,0 +1,9 @@
+# runtime state
+node_modules/
+test-bridge/
+examples/demo-bridge/
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db

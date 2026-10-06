@@ -1,0 +1,47 @@
+{
+  "name": "agent-bridge",
+  "version": "0.1.0",
+  "description": "A file-based mailbox that lets two coding agents (OpenAI Codex and DeepSeek Harness) talk to each other on one machine — one agent advises, the other executes, both can ask follow-ups.",
+  "keywords": [
+    "agents",
+    "coding-agent",
+    "codex",
+    "deepseek-harness",
+    "dsh",
+    "multi-agent",
+    "mailbox",
+    "mcp",
+    "orchestration"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "agent-bridge": "lib/mailbox.mjs",
+    "agent-bridge-v2": "lib/mailbox-v2.mjs"
+  },
+  "exports": {
+    ".": "./lib/core.mjs",
+    "./v2": "./lib/core-v2.mjs",
+    "./plugin": "./plugin/index.js"
+  },
+  "files": [
+    "lib",
+    "plugin",
+    "docs",
+    "examples",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node tests/mailbox.test.mjs && node tests/protocol-v2.test.mjs && node tests/cli-v2.test.mjs && node tests/migrate.test.mjs && node tests/manifest.test.mjs && node tests/plugin.test.mjs && node tests/plugin-v2.test.mjs && node tests/cutover-faults.test.mjs",
+    "test:live": "node tests/cutover-probe.mjs",
+    "test:probes": "node tests/acp-live-probe.mjs && node tests/acp-wake-probe.mjs",
+    "inventory": "node tests/v1-inventory.mjs",
+    "demo": "node examples/demo.mjs"
+  },
+  "private": false
+}

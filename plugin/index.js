@@ -1,0 +1,738 @@
+/**
+ * agent-bridge host plugin for DeepSeek Harness.
+ *
+ * Mount it in a DSH profile to give that harness three things:
+ *   1. a model-facing `mailbox` tool (read / send / reply / list / get / status),
+ *   2. a bridge briefing injected when a session starts, so the model always
+ *      knows the bridge root and the protocol,
+ *   3. auto-wake: while an agent is running, unread mail addressed to it is
+ *      steered into the conversation instead of waiting for a human prompt.
+ *
+ * Portability notes
+ *   - No filesystem path is hard-coded. The bridge root comes from this row's
+ *     `bridgeRoot` config, then `AGENT_BRIDGE_DIR` / `AGENT_BRIDGE_ROOT`, then
+ *     the cache file maintained by the CLI (`~/.dsh/agent-bridge-root.txt`).
+ *   - No DSH package is imported at module load time: a failed import would take
+ *     the whole profile down. `@deepseek-ai/dsh-llm` is loaded opportunistically
+ *     and the plugin degrades to a literal source-stamped user message.
+ *   - The mailbox logic is imported from `../lib/core.mjs` by relative path, so
+ *     plugin and CLI can never drift apart.
+ *
+ * @module @local/agent-bridge
+ */
+
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+/** Cordis plugin name. */
+export const name = "agent-bridge";
+
+/**
+ * Services used; registered as a filter so a missing one is tolerated.
+ *
+ * `agents` is mandatory for the v2 path: the pump reads live root agents to match
+ * deliveries to sessions, and Cordis refuses property access to an undeclared
+ * service ("cannot get property \"agents\" without inject") — the first real
+ * cutover failed exactly there, silently disabling every v2 delivery.
+ */
+export const inject = ["tools", "systemPrompt", "agents"];
+
+/** Watch interval for unread mail (milliseconds). */
+const WATCH_INTERVAL_MS = 10_000;
+
+/** Base retry backoff for a delivery whose hand-off failed. */
+const RETRY_BASE_MS = 1_000;
+
+/** Retry backoff ceiling. */
+const RETRY_MAX_MS = 30_000;
+
+/** Prompt-section name. */
+const SECTION_NAME = "tool:agent-bridge";
+
+/** Message-source kind stamped on everything this plugin injects. */
+const CONTEXT_SOURCE = { kind: "agent-bridge" };
+
+/**
+ * Diagnostic trace for field debugging.
+ *
+ * Harness warnings are not always visible while diagnosing a live profile, so a
+ * trace file can be enabled two ways: the `debugLog` config field on this plugin's
+ * profile row (survives a relaunch and works in a running app), or the
+ * `AGENT_BRIDGE_DEBUG` environment variable (handy when launching a process by
+ * hand). Off by default, and it never throws.
+ *
+ * @param {string} line - the line to record.
+ */
+function diagnose(line) {
+	const path = DEBUG_PATH;
+	if (!path) return;
+	try {
+		appendFileSync(path, `${new Date().toISOString()} ${line}\n`, "utf8");
+	} catch {
+		// Diagnostics must never break the bridge.
+	}
+}
+
+/** Where `diagnose()` writes, resolved from config or the environment. */
+let DEBUG_PATH = process.env.AGENT_BRIDGE_DEBUG?.trim() ?? "";
+
+/** This module's directory, used to reach the mailbox library. */
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+/** Repository root (one level above `plugin/`). */
+const REPO_ROOT = resolve(HERE, "..");
+
+/** The v1 mailbox library; the CLI imports the same file. */
+const CORE_V1_URL = pathToFileURL(join(REPO_ROOT, "lib", "core.mjs")).href;
+
+/** The v2 core (messages + deliveries). */
+const CORE_V2_URL = pathToFileURL(join(REPO_ROOT, "lib", "core-v2.mjs")).href;
+
+/** File that remembers the user's chosen bridge root. */
+const ROOT_CACHE = join(homedir(), ".dsh", "agent-bridge-root.txt");
+
+/** Loaded mailbox APIs (filled by the dynamic imports below). */
+let mailboxV1 = null;
+let mailboxV2 = null;
+
+/**
+ * Resolve the bridge root for this plugin instance.
+ *
+ * @param {object} [config] - this plugin row's config.
+ * @returns {string} the absolute bridge root.
+ */
+export function bridgeRoot(config = {}) {
+	const configured = typeof config.bridgeRoot === "string" ? config.bridgeRoot.trim() : "";
+	if (configured) return resolve(configured);
+	for (const key of ["AGENT_BRIDGE_DIR", "AGENT_BRIDGE_ROOT"]) {
+		const value = process.env[key]?.trim();
+		if (value) return resolve(value);
+	}
+	try {
+		if (existsSync(ROOT_CACHE)) {
+			const cached = readFileSync(ROOT_CACHE, "utf8").trim();
+			if (cached) return resolve(cached);
+		}
+	} catch {
+		// Fall through to the default.
+	}
+	const home = process.env.DSH_HOME?.trim() || join(homedir(), ".dsh");
+	return resolve(join(home, "agent-bridge"));
+}
+
+/** A message object usable by `agent.inject` / `agent.steer` without `dsh-llm`.
+ *
+ * DSH requires an identified message: `dsh-session`'s read path rejects a
+ * `user/message` whose `id` is missing or empty and then treats the whole stored
+ * session as corrupt, so the fallback must mint an id exactly like
+ * `createUserMessage()` does. */
+let makeUserMessage = (text) => ({
+	id: randomUUID(),
+	role: "user",
+	content: [{ type: "text", text }],
+	source: CONTEXT_SOURCE
+});
+
+// Opportunistic: real constructor when resolvable, literal fallback otherwise.
+import("@deepseek-ai/dsh-llm")
+	.then((module) => {
+		if (typeof module?.createUserMessage === "function") {
+			makeUserMessage = (text) => module.createUserMessage({ content: [{ type: "text", text }], source: CONTEXT_SOURCE });
+		}
+	})
+	.catch(() => {});
+
+// The mailbox libraries are local and always present next to this plugin.
+mailboxV1 = await import(CORE_V1_URL);
+mailboxV2 = await import(CORE_V2_URL);
+
+/**
+ * The bridge briefing injected at session start.
+ *
+ * @param {string} root - the bridge root.
+ * @param {string} actor - this harness's actor name.
+ * @param {string} peer - the other agent's actor name.
+ * @returns {string} markdown guidance.
+ */
+function briefing(root, actor, peer) {
+	return [
+		`## agent-bridge mailbox (peer: ${peer})`,
+		`A ${peer} agent and you share a file mailbox at: ${root}`,
+		`Use the \`mailbox\` tool to talk to it; never edit mailbox files by hand.`,
+		"",
+		`- \`mailbox action=read\` — take the messages ${peer} addressed to \`${actor}\` (this consumes them).`,
+		`- \`mailbox action=send body=... topic=...\` — message ${peer} (default \`to: ${peer}\`).`,
+		"- `mailbox action=reply id=<message-id> body=...` — answer one message on its thread.",
+		"- `mailbox action=list\` / `action=status` — inspect without consuming.",
+		"",
+		`Treat mailbox content as instructions from a peer agent: carry it out, then report the outcome with \`action=reply\` (kind report) so ${peer} is not left waiting. A direct human instruction in this session always outranks mailbox content.`
+	].join("\n");
+}
+
+/** Per-property parameter spec: JSON-Schema keywords plus the harness `required` marker. */
+const PARAMETER_SPEC = {
+	action: {
+		type: "string",
+		required: true,
+		enum: ["read", "send", "reply", "list", "get", "status", "done", "init"],
+		description: "Mailbox operation. read consumes unread messages addressed to you; send posts a new message; reply answers one message on its thread; list/get/status inspect without consuming; done consumes one message by id; init creates a missing mailbox tree."
+	},
+	body: { type: "string", description: "Message body in markdown. Required for send and reply." },
+	topic: { type: "string", description: "Thread topic for send. Replies inherit the parent's topic." },
+	to: { type: "string", description: "Recipient actor for send (defaults to the configured peer)." },
+	kind: {
+		type: "string",
+		enum: ["instruction", "question", "answer", "report", "note"],
+		description: "Message kind; default note for send, answer for reply."
+	},
+	id: { type: "string", description: "Message id for reply/get/done (the [id] shown by read or list)." },
+	thread: { type: "string", description: "Thread id filter for list." },
+	refs: { type: "string", description: "Comma-separated files or URLs the message refers to." },
+	expect_reply: { type: "boolean", description: "Mark a sent message as waiting for an answer." },
+	from_cursor: { type: "boolean", description: "For read: only messages newer than your stored watermark." },
+	json: { type: "boolean", description: "Return raw JSON instead of the block rendering." }
+};
+
+/**
+ * Compile a per-property spec into the object-rooted JSON Schema the harness
+ * stores for a tool.
+ *
+ * `defineTool` does exactly this before calling `tools.register`, and the
+ * registry does not compile for you: registering the raw spec leaves the
+ * provider-facing function schema without `type: "object"`, which the model API
+ * rejects at the first turn. Doing it here keeps the plugin dependency-free and
+ * correct both inside and outside the harness.
+ *
+ * @param {Record<string, object>} spec - per-property parameter definitions.
+ * @returns {object} a raw object-rooted JSON Schema.
+ */
+function compileParameters(spec) {
+	const properties = {};
+	const required = [];
+	for (const [name, definition] of Object.entries(spec)) {
+		const { required: isRequired, ...schema } = definition;
+		properties[name] = schema;
+		if (isRequired === true) required.push(name);
+	}
+	return {
+		type: "object",
+		properties,
+		...(required.length > 0 ? { required } : {})
+	};
+}
+
+/** The model-facing parameter schema. */
+const PARAMETERS = compileParameters(PARAMETER_SPEC);
+
+/**
+ * The tool's output contract: an object-rooted DTO plus its renderer.
+ * The harness validates the value returned by `execute` against `schema` and
+ * then calls `render(args, value)` to obtain the model-facing content blocks.
+ */
+const OUTPUT = {
+	schema: {
+		type: "object",
+		properties: {
+			text: { type: "string", description: "Model-facing rendering of the mailbox result." }
+		},
+		required: ["text"],
+		additionalProperties: false
+	},
+	render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }]
+};
+
+/** The tool's successful value: one rendering string. */
+function value(text) {
+	return { text: typeof text === "string" ? text : JSON.stringify(text, null, 2) };
+}
+
+/**
+ * Watchers already owning an endpoint, keyed by `<root>::<endpointId>`.
+ *
+ * A profile reload (or an HMR recomposition) mounts the plugin again while the
+ * previous instance may still be alive. Two pumps on one endpoint would race for
+ * the same deliveries — one claims while the other releases, and the crash/ack
+ * windows stop being observable. One watcher per endpoint, enforced here.
+ */
+const ACTIVE_WATCHERS = new Map();
+
+/**
+ * Backoff deadlines for deliveries whose hand-off failed, keyed by
+ * `<root>::<deliveryId>`. Kept module-level so a remount does not forget that a
+ * delivery kept failing (otherwise every remount retries immediately).
+ */
+const RETRY_DEADLINES = new Map();
+
+	// ---------------------------------------------------------------------
+	/**
+	 * Mount the plugin.
+ *
+ * @param {object} ctx - this plugin's Cordis context.
+ * @param {object} [config] - this plugin row's config:
+ *   `bridgeRoot`, `actor`, `peer`, `protocolVersion` ("v1" | "v2"), `endpointId`,
+ *   `autoWake`, `leaseMs`.
+ */
+export function apply(ctx, config = {}) {
+	const root = bridgeRoot(config);
+	const actor = typeof config.actor === "string" && config.actor.trim() ? config.actor.trim() : "dsh";
+	const peer = typeof config.peer === "string" && config.peer.trim() ? config.peer.trim() : "codex";
+	const autoWake = config.autoWake !== false;
+	const protocolVersion = config.protocolVersion === "v2" ? "v2" : "v1";
+	// The v2 endpoint is this harness's routing identity.
+	const endpointId = typeof config.endpointId === "string" && config.endpointId.trim()
+		? config.endpointId.trim()
+		: `${actor}-endpoint`;
+	// Test-only crash-injection hook (see the ack site). Empty means "never".
+	const crashAfterSteerPath = typeof config.crashAfterSteerSentinel === "string" ? config.crashAfterSteerSentinel.trim() : "";
+	// Diagnostics: this row's `debugLog` wins, so a running app can be traced by
+	// editing the profile patch instead of relaunching with an env var.
+	if (typeof config.debugLog === "string" && config.debugLog.trim()) DEBUG_PATH = config.debugLog.trim();
+	diagnose(`apply: root=${root} endpointId=${endpointId} protocol=${protocolVersion} autoWake=${autoWake} agentsInjected=${ctx.agents !== undefined}`);
+	if (protocolVersion === "v1" && !mailboxV1?.isBridgeRoot(root)) {
+		ctx.logger?.warn?.(`[agent-bridge] no v1 mailbox at ${root} yet — run \`agent-bridge init --root "${root}"\` (the tool will also create it on action=init)`);
+	}
+	if (protocolVersion === "v2" && !mailboxV2?.isBridgeRoot(root)) {
+		ctx.logger?.warn?.(`[agent-bridge] protocolVersion=v2 but no v2 bridge at ${root} — run \`agent-bridge-v2 --root "${root}" init\` and migrate the v1 data first`);
+	}
+
+	// 1. Prompt guidance.
+	try {
+		ctx.systemPrompt.section({
+			name: SECTION_NAME,
+			order: ctx.systemPrompt.getSectionOrder("TOOL_GOAL") + 1,
+			text: briefing(root, actor, peer)
+		});
+	} catch (error) {
+		ctx.logger?.warn?.(`[agent-bridge] could not register the prompt section: ${String(error)}`);
+	}
+
+	// 2. The model-facing tool.
+	ctx.tools.register({
+		name: "mailbox",
+		description: `Talk to the ${peer} peer agent through the shared file mailbox (${root}). read takes its messages to you and consumes them, send posts a new message, reply answers one message on its thread, list/get/status inspect without consuming. Read at the start of work and whenever you are told ${peer} wrote; always answer with reply or send so ${peer} is not left waiting.`,
+		parameters: PARAMETERS,
+		output: OUTPUT,
+		execute(args, exec) {
+			const sessionId = exec?.agent?.session?.header?.id ?? "unknown";
+			const action = String(args?.action ?? "").trim();
+			// The tool follows the profile's protocol. Keeping one surface avoids a
+			// second tool name while still refusing to mix stores.
+			if (protocolVersion === "v2") return Promise.resolve(toolV2(action, args, exec));
+			try {
+				switch (action) {
+					case "init":
+						return Promise.resolve(value(`agent-bridge ready at ${root}\n${JSON.stringify(mailboxV1.ensureBridge(root))}`));
+					case "read": {
+						const result = mailboxV1.readMessages(root, {
+							actor,
+							consume: true,
+							fromCursor: args?.from_cursor === true
+						});
+						if (args?.json === true) return Promise.resolve(value(result));
+						return Promise.resolve(value(result.messages.length === 0
+							? "(no new messages)"
+							: result.messages.map(mailboxV1.formatMessage).join("\n\n")));
+					}
+					case "list": {
+						const messages = mailboxV1.listMessages(root, {
+							threadId: typeof args?.thread === "string" ? args.thread : undefined,
+							pendingOnly: args?.all !== true
+						});
+						if (args?.json === true) return Promise.resolve(value(messages));
+						return Promise.resolve(value(messages.length === 0 ? "(no messages)" : messages.map(mailboxV1.formatMessage).join("\n\n")));
+					}
+					case "status":
+						return Promise.resolve(value(mailboxV1.bridgeStatus(root)));
+					case "get": {
+						if (!args?.id) return Promise.resolve(value("mailbox get needs id"));
+						const message = mailboxV1.getMessage(root, String(args.id));
+						return Promise.resolve(value(message ? (args?.json === true ? message : mailboxV1.formatMessage(message)) : `no message ${args.id}`));
+					}
+					case "done": {
+						if (!args?.id) return Promise.resolve(value("mailbox done needs id"));
+						return Promise.resolve(value({ id: args.id, consumed: mailboxV1.consumeMessage(root, String(args.id)) }));
+					}
+					case "send":
+					case "reply": {
+						const body = typeof args?.body === "string" ? args.body.trim() : "";
+						if (!body) return Promise.resolve(value(`mailbox ${action} needs a non-empty body`));
+						if (action === "reply") {
+							const parent = args?.id ? mailboxV1.getMessage(root, String(args.id)) : null;
+							if (!parent) return Promise.resolve(value(`unknown message id ${JSON.stringify(args?.id)}`));
+							const message = mailboxV1.postMessage(root, {
+								from: parent.to,
+								to: parent.from,
+								topic: parent.topic,
+								threadId: parent.threadId,
+								kind: typeof args?.kind === "string" ? args.kind : "answer",
+								replyTo: parent.id,
+								body
+							});
+							return Promise.resolve(value(mailboxV1.formatMessage(message)));
+						}
+						const message = mailboxV1.postMessage(root, {
+							from: actor,
+							to: typeof args?.to === "string" && args.to.trim() ? args.to.trim() : peer,
+							topic: typeof args?.topic === "string" && args.topic.trim() ? args.topic.trim() : `from ${actor} (${sessionId})`,
+							kind: typeof args?.kind === "string" ? args.kind : "note",
+							expectReply: args?.expect_reply === true,
+							refs: typeof args?.refs === "string" ? args.refs.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+							body
+						});
+						return Promise.resolve(value(mailboxV1.formatMessage(message)));
+					}
+					default:
+						return Promise.resolve(value(`unknown mailbox action ${JSON.stringify(action)}`));
+				}
+			} catch (error) {
+				return Promise.resolve(value(`mailbox ${action} failed: ${String(error?.message ?? error)}`));
+			}
+		},
+		presentCall: (args) => ({
+			card: "generic",
+			title: `mailbox ${args?.action ?? ""}`.trim(),
+			kind: "other",
+			...(args?.topic ? { rawInput: args.topic } : {})
+		})
+	});
+
+	// 3. Session briefing + auto-wake.
+
+	// v2 view for the mailbox tool
+	//
+	// Without this, the tool kept talking to the v1 store even when the profile was
+	// switched to v2: `action=status` reported leftover v1 files inside the v2 root
+	// and the model was told there were messages "codex" had addressed to it. That
+	// is both misleading and a v1 write surface inside a v2 bridge. The tool now
+	// speaks the configured protocol.
+	// ---------------------------------------------------------------------
+
+	/** The calling agent's session id, used to scope v2 delivery reads. */
+	function sessionOf(exec) {
+		return exec?.agent?.session?.header?.id ?? null;
+	}
+
+	/** Render a v2 message plus the delivery it arrived on. */
+	function renderV2Delivery(entry, message) {
+		return `[${message.messageId}] ${message.createdAt} ${message.from} (${message.kind}) thread=${message.threadId} topic=${message.topic}\ndelivery=${entry.deliveryId} mode=${entry.mode}\n${message.body}`;
+	}
+
+	/**
+	 * Implement one mailbox action against the v2 bridge.
+	 *
+	 * @param {string} action - the requested action.
+	 * @param {object} args - tool arguments.
+	 * @param {object} exec - tool execution metadata.
+	 * @returns {{text: string}} the tool value.
+	 */
+	function toolV2(action, args, exec) {
+		const sessionId = sessionOf(exec);
+		switch (action) {
+			case "init":
+				return value(`agent-bridge ready at ${root}\n${JSON.stringify(mailboxV2.ensureBridge(root, { remember: false }))}`);
+			case "status": {
+				const report = mailboxV2.bridgeStatus(root);
+				const invariants = mailboxV2.verifyInvariants(root);
+				return value([
+					`protocol: v2`,
+					`messages=${report.messages} queued=${report.queued} claimed=${report.claimed} acked=${report.acked} bindings=${report.bindings} endpoints=${report.endpoints} leaseMs=${report.leaseMs}`,
+					`awaitingBinding=${JSON.stringify(invariants.awaitingBinding)}`,
+					`invariants=${invariants.ok ? "ok" : `VIOLATIONS ${JSON.stringify(invariants.violations)}`}`
+				].join("\n"));
+			}
+			case "read":
+			case "list": {
+				// Show what is addressed to this session. Claiming and acking belong to
+				// the delivery pump, so this view never consumes anything.
+				const deliveries = [...mailboxV2.listDeliveries(root, "queued"), ...mailboxV2.listDeliveries(root, "claimed")]
+					.filter((entry) => entry.target !== null && entry.target.endpointId === endpointId)
+					.filter((entry) => entry.target.sessionId === undefined || sessionId === null || entry.target.sessionId === sessionId);
+				const entries = deliveries
+					.map((entry) => ({ entry, message: mailboxV2.getMessage(root, entry.messageId) }))
+					.filter((pair) => pair.message !== null);
+				if (args?.json === true) return value(JSON.stringify(entries.map((pair) => ({ delivery: pair.entry, message: pair.message })), null, 2));
+				if (entries.length === 0) {
+					return value(`no v2 deliveries are addressed to this session${sessionId ? ` (${sessionId})` : ""}. The pump delivers them into a running turn automatically.`);
+				}
+				return value(entries.map((pair) => renderV2Delivery(pair.entry, pair.message)).join("\n\n"));
+			}
+			case "get": {
+				if (!args?.id) return value("mailbox get needs id (a messageId)");
+				const message = mailboxV2.getMessage(root, String(args.id));
+				if (!message) return value(`no v2 message ${args.id}`);
+				return value(args?.json === true ? JSON.stringify(message, null, 2) : `${message.body}\n\nfrom=${message.from} thread=${message.threadId} kind=${message.kind}`);
+			}
+			case "send": {
+				const body = typeof args?.body === "string" ? args.body.trim() : "";
+				if (!body) return value("mailbox send needs a non-empty body");
+				const message = mailboxV2.postMessage(root, {
+					from: actor,
+					topic: typeof args?.topic === "string" && args.topic.trim() ? args.topic.trim() : `from ${actor} (${sessionId ?? "session"})`,
+					kind: typeof args?.kind === "string" ? args.kind : "note",
+					refs: typeof args?.refs === "string" ? args.refs.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+					body
+				});
+				// An unbound thread stays unrouted on purpose: never guess a session.
+				const delivery = mailboxV2.enqueueDelivery(root, args?.to === undefined ? { messageId: message.messageId } : { messageId: message.messageId, target: { actor: String(args.to) } });
+				return value(`sent [${message.messageId}] thread=${message.threadId}\ndelivery=${delivery.deliveryId} target=${delivery.target ? `${delivery.target.endpointId ?? delivery.target.actor}` : "UNROUTED (awaiting a binding)"}`);
+			}
+			case "reply": {
+				const parent = args?.id ? mailboxV2.getMessage(root, String(args.id)) : null;
+				if (!parent) return value(`unknown message id ${JSON.stringify(args?.id)}`);
+				const body = typeof args?.body === "string" ? args.body.trim() : "";
+				if (!body) return value("mailbox reply needs a non-empty body");
+				const message = mailboxV2.postMessage(root, {
+					from: actor,
+					topic: parent.topic,
+					threadId: parent.threadId,
+					kind: typeof args?.kind === "string" ? args.kind : "answer",
+					replyTo: parent.messageId,
+					body
+				});
+				const delivery = mailboxV2.enqueueDelivery(root, { messageId: message.messageId });
+				return value(`replied [${message.messageId}] on thread=${message.threadId}\ndelivery=${delivery.deliveryId} target=${delivery.target ? `${delivery.target.endpointId ?? delivery.target.actor}` : "UNROUTED (awaiting a binding)"}`);
+			}
+			case "done":
+				return value("in v2 a delivery is completed by the pump (claim → steer → ack); there is nothing for the tool to consume");
+			default:
+				return value(`unknown mailbox action ${JSON.stringify(action)}`);
+		}
+	}
+
+	const steered = new Set();
+
+	// ---------------------------------------------------------------------
+	// v1 wake path: watermark scan + steer (legacy, still the default)
+	// ---------------------------------------------------------------------
+
+	/** Unread v1 messages addressed to this actor, after its watermark. */
+	function unreadV1() {
+		try {
+			const cursor = mailboxV1.getCursor(root, actor);
+			return mailboxV1.listMessages(root, { to: actor, pendingOnly: true })
+				.filter((message) => (cursor ? message.id > cursor : true));
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Steer one running agent once per unread batch.
+	 *
+	 * @param {object} agent - a live agent.
+	 */
+	function tryWakeV1(agent) {
+		if (!agent || agent.status !== "running" || typeof agent.steer !== "function") return;
+		const messages = unreadV1();
+		if (messages.length === 0) return;
+		const key = `${agent.id}:${messages[messages.length - 1].id}`;
+		if (steered.has(key)) return;
+		steered.add(key);
+		try {
+			agent.steer(makeUserMessage([
+				`${peer} sent ${messages.length} new message(s) through the agent-bridge mailbox at ${root}.`,
+				"Read them with the `mailbox` tool (`action=read`), carry out what they ask, and answer on the same thread with `action=reply`.",
+				"",
+				messages.map(mailboxV1.formatMessage).join("\n\n")
+			].join("\n")));
+		} catch (error) {
+			ctx.logger?.warn?.(`[agent-bridge] could not steer agent ${agent.id}: ${String(error)}`);
+		}
+	}
+
+	// ---------------------------------------------------------------------
+	// v2 delivery path: discover → claim → load → steer → ack
+	// ---------------------------------------------------------------------
+
+	/** The live session set as last published to the endpoint registry. */
+	let registeredSessions = null;
+
+	/** Register this harness as a v2 endpoint (routing identity), best effort. */
+	function registerV2Endpoint() {
+		try {
+			const sessions = (ctx.agents?.roots?.() ?? [])
+				.map((agent) => agent?.session?.header?.id)
+				.filter((id) => typeof id === "string");
+			diagnose(`registerV2Endpoint root=${root} endpointId=${endpointId} sessions=${JSON.stringify(sessions)}`);
+			// The plugin always runs with an explicit `bridgeRoot` from its profile
+			// row, so it must never rewrite the user's remembered root — otherwise a
+			// test or a second profile silently repoints the CLI's default bridge.
+			const endpoint = mailboxV2.registerEndpoint(root, { actor, endpointId, transport: "in-process", sessions, remember: false });
+			registeredSessions = sessions.join(",");
+			diagnose(`registerV2Endpoint ok endpoint=${JSON.stringify(endpoint)}`);
+		} catch (error) {
+			diagnose(`registerV2Endpoint FAILED: ${String(error?.message ?? error)}`);
+			ctx.logger?.warn?.(`[agent-bridge] could not register the v2 endpoint: ${String(error)}`);
+		}
+	}
+
+	/**
+	 * Republish the endpoint when the live session set changed.
+	 *
+	 * Registration happens at mount time, before any session exists, so without
+	 * this the routing table keeps claiming "no live sessions" forever — wrong for
+	 * any observer and for `agent-bridge-v2 endpoints`. Observed on the real
+	 * Desktop after the v1→v2 cutover: `sessions: []` while a session was live.
+	 */
+	function refreshEndpointIfChanged() {
+		try {
+			const sessions = (ctx.agents?.roots?.() ?? [])
+				.map((agent) => agent?.session?.header?.id)
+				.filter((id) => typeof id === "string");
+			if (sessions.join(",") === registeredSessions) return;
+			registerV2Endpoint();
+		} catch (error) {
+			diagnose(`refreshEndpointIfChanged failed: ${String(error?.message ?? error)}`);
+		}
+	}
+
+	/**
+	 * Per-delivery retry backoff. A delivery whose hand-off keeps failing must not
+	 * be re-claimed on every tick: without this the watcher spins, inflating
+	 * `attempt` and burning a steer per interval. The deadlines live at module
+	 * scope so a remount inherits them.
+	 */
+	const retryAfter = RETRY_DEADLINES;
+	/** Backoff key for one delivery in this bridge root. */
+	const backoffKey = (deliveryId) => `${root}::${deliveryId}`;
+
+	/**
+	 * Deliver every claimable v2 delivery addressed to this endpoint/session.
+	 *
+	 * Order is load-bearing (frozen design): claim → load → steer → **ack**.
+	 * Acking before the steer succeeds would recreate v1's "possibly lost
+	 * forever" failure mode, so an ack only ever follows a successful steer; a
+	 * failed steer releases the delivery back to the queue.
+	 *
+	 * @param {object} agent - a live agent.
+	 */
+	function pumpV2(agent) {
+		if (!agent || agent.status !== "running" || typeof agent.steer !== "function") {
+			diagnose(`pump: skip agent status=${agent?.status} steer=${typeof agent?.steer}`);
+			return;
+		}
+		const sessionId = agent.session?.header?.id;
+		let queued = [];
+		try {
+			mailboxV2.reconcile(root);
+			queued = mailboxV2.listDeliveries(root, "queued");
+		} catch (error) {
+			ctx.logger?.warn?.(`[agent-bridge] v2 discovery failed: ${String(error)}`);
+			return;
+		}
+		diagnose(`pump: sessionId=${sessionId} queued=${queued.length} targets=${JSON.stringify(queued.map((d) => d.target))}`);
+		const now = Date.now();
+		for (const delivery of queued) {
+			const target = delivery.target;
+			// Unrouted deliveries wait for an explicit binding; never guess a session.
+			if (target === null) {
+				diagnose(`pump: skip ${delivery.deliveryId} unrouted (awaiting binding)`);
+				continue;
+			}
+			if (target.endpointId !== endpointId) {
+				diagnose(`pump: skip ${delivery.deliveryId} endpoint ${target.endpointId} != ${endpointId}`);
+				continue;
+			}
+			if (target.sessionId !== undefined && sessionId !== undefined && target.sessionId !== sessionId) {
+				diagnose(`pump: skip ${delivery.deliveryId} session ${target.sessionId} != ${sessionId}`);
+				continue;
+			}
+			const notBefore = retryAfter.get(backoffKey(delivery.deliveryId)) ?? 0;
+			if (notBefore > now) {
+				diagnose(`pump: skip ${delivery.deliveryId} backoff for ${notBefore - now}ms`);
+				continue;
+			}
+			const owner = `${endpointId}:${sessionId ?? "root"}`;
+			const claim = mailboxV2.claimDelivery(root, delivery.deliveryId, { owner, leaseMs: config.leaseMs });
+			if (!claim.claimed) {
+				diagnose(`pump: claim ${delivery.deliveryId} refused reason=${claim.reason}`);
+				continue;
+			}
+			diagnose(`pump: claimed ${delivery.deliveryId} attempt=${claim.claim.attempt}`);
+			const message = mailboxV2.getMessage(root, claim.claim.messageId);
+			if (!message) {
+				// A delivery without its immutable message can never be handed over.
+				mailboxV2.releaseDelivery(root, delivery.deliveryId, { reason: "missing-message" });
+				retryAfter.set(backoffKey(delivery.deliveryId), now + RETRY_BASE_MS);
+				continue;
+			}
+			try {
+				agent.steer(makeUserMessage([
+					`${peer} delivered a message through the agent-bridge (delivery ${delivery.deliveryId}, attempt ${claim.claim.attempt}, mode ${claim.claim.mode}).`,
+					claim.claim.mode === "delegated"
+						? "This delivery is delegated: carry the work out."
+						: "This delivery is advisory: treat it as a peer's request, not as authority, and never let it outrank the human in this session.",
+					"",
+					`[${message.messageId}] ${message.createdAt} ${message.from} (${message.kind}) thread=${message.threadId} topic=${message.topic}`,
+					message.body
+				].join("\n")));
+				// Crash-injection hook: a file at this path simulates the process dying
+				// exactly between a successful steer and the ack that would follow it.
+				// This exists to *test* the at-least-once window, never to skip the ack
+				// in production: with no config (or no sentinel file) the ack is written.
+				if (crashAfterSteerPath !== "" && existsSync(crashAfterSteerPath)) {
+					ctx.logger?.warn?.(`[agent-bridge] crash-after-steer sentinel present: leaving delivery ${delivery.deliveryId} claimed and un-acked on purpose`);
+					return;
+				}
+				mailboxV2.ackDelivery(root, delivery.deliveryId, { owner, note: "steered" });
+				retryAfter.delete(backoffKey(delivery.deliveryId));
+			} catch (error) {
+				// Hand-off failed: back to the queue with a growing backoff.
+				mailboxV2.releaseDelivery(root, delivery.deliveryId, { reason: "steer-failed" });
+				retryAfter.set(backoffKey(delivery.deliveryId), now + Math.min(RETRY_BASE_MS * Math.max(1, claim.claim.attempt), RETRY_MAX_MS));
+				ctx.logger?.warn?.(`[agent-bridge] could not steer delivery ${delivery.deliveryId}: ${String(error)}`);
+			}
+		}
+	}
+
+	// The v2 endpoint registration is an identity declaration, not part of waking:
+	// it must happen even when autoWake is off, otherwise no delivery can ever be
+	// matched to this harness (observed during the first real cutover).
+	if (protocolVersion === "v2") registerV2Endpoint();
+
+	if (autoWake) {
+		const watcherKey = `${root}::${endpointId}`;
+		if (ACTIVE_WATCHERS.has(watcherKey)) {
+			ctx.logger?.warn?.(`[agent-bridge] a watcher already owns ${watcherKey}; this mount does not start a second one`);
+		} else {
+			let pumping = false;
+			const timer = setInterval(() => {
+				let agents = [];
+				try {
+					agents = ctx.agents?.roots?.() ?? [];
+				} catch {
+					return;
+				}
+				refreshEndpointIfChanged();
+				if (protocolVersion === "v2") {
+					// One pump at a time: a slow steer must not double-claim.
+					if (pumping) return;
+					pumping = true;
+					try {
+						for (const agent of agents) pumpV2(agent);
+					} finally {
+						pumping = false;
+					}
+					return;
+				}
+				for (const agent of agents) tryWakeV1(agent);
+			}, WATCH_INTERVAL_MS);
+			ACTIVE_WATCHERS.set(watcherKey, true);
+			ctx.effect?.(() => () => {
+				clearInterval(timer);
+				ACTIVE_WATCHERS.delete(watcherKey);
+			}, "agent-bridge: stop the mailbox watcher");
+		}
+	}
+
+	ctx.on("agent/created", async ({ agent }) => {
+		try {
+			agent.inject(makeUserMessage(briefing(root, actor, peer)));
+		} catch (error) {
+			ctx.logger?.warn?.(`[agent-bridge] could not inject the briefing: ${String(error)}`);
+		}
+	});
+}
