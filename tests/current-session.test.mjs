@@ -409,37 +409,46 @@ function seedDelivery(root, input) {
 	}
 }
 
-// --- 9. a session never claims work that belongs to another one ----------------
-// Locked in after seeing a delegated instruction reach `attempt 33` on the real bridge: a second live
-// session appeared to claim it, find it was not the target, release it, and claim it again on the next
-// tick, so the history read like 33 failed deliveries when nothing had failed — the right session had
-// simply lost the race. The delivery was never lost; `attempt` stopped being a signal.
+// --- 9. an ineligible session must not mutate a delivery at all -----------------
+// The invariant, stated as the brief states it: an ineligible receiver/session must not change a
+// delivery's claim state, lease, owner or attempt counter. `attempt` is incremented at claim time and
+// nowhere else, so any claim by a session that cannot hand the delivery over burns an attempt for
+// nothing — which is how a delegated instruction reached `attempt 33` while never being lost.
 //
-// What this asserts is the invariant, not the mechanism. A guard added alongside this test was removed
-// again because disabling that guard did not make the test fail, which means the test was not
-// exercising it — the existing session check already provides the behaviour. This still fails if
-// anyone reorders the checks so that claiming happens first.
+// The case no other check covers is a candidate whose own session cannot be resolved: the existing
+// guard skips only when both sides are known and differ, so an unresolved candidate used to claim a
+// delivery addressed to somebody else. That is what this exercises, and the test fails if the
+// eligibility check before `claim()` is removed.
 {
-	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-ownership-"));
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-eligibility-"));
 	core.ensureBridge(root, { remember: false });
-	const target = "session-owned-by-other";
-	const bystander = "session-bystander";
-	core.registerEndpoint(root, { actor: "dsh", endpointId: "dsh-endpoint", transport: "in-process", sessions: [target, bystander], remember: false });
+	const target = "session-eligibility-target";
+	core.registerEndpoint(root, { actor: "dsh", endpointId: "dsh-endpoint", transport: "in-process", sessions: [target], remember: false });
 	try {
-		const message = core.postMessage(root, { from: "codex", topic: "ownership", kind: "instruction", body: "for the other session" });
+		const message = core.postMessage(root, { from: "codex", topic: "eligibility", kind: "instruction", body: "for the target only" });
 		core.bindThread(root, { threadId: message.threadId, endpointId: "dsh-endpoint", sessionId: target, mode: "delegated" });
 		const delivery = core.enqueueDelivery(root, { messageId: message.messageId, actor: "dsh", endpointId: "dsh-endpoint", sessionId: target, mode: "delegated" });
+		assert.equal(core.getDelivery(root, delivery.deliveryId).attempt, 0, "a fresh delivery has attempt 0");
+		assert.equal(core.getDelivery(root, delivery.deliveryId).state, "queued", "and is queued");
 
-		// A *running* agent for a different session: able to steer, but not the addressee.
-		const steered = [];
-		const agent = { status: "running", steer: (entry) => steered.push(entry), session: { header: { id: bystander } } };
-		const mock = mockContext(agent);
-		plugin.apply(mock.ctx, { bridgeRoot: root, protocolVersion: "v2", endpointId: "dsh-endpoint", watchIntervalMs: 400, debugLog: join(root, "trace.log") });
+		// Two sessions that are live but cannot resolve their own identity. They are exactly the
+		// candidates the old guard let through: `sessionId` is undefined, so "target !== mine" was
+		// never true and the delivery was claimed.
+		const bystanders = [
+			{ status: "idle", steer: () => {}, followup: () => {}, session: { header: {} } },
+			{ status: "idle", steer: () => {}, followup: () => {}, session: { header: {} } }
+		];
+		const mock = mockContext(bystanders[0]);
+		mock.ctx.agents.roots = () => bystanders;
+		plugin.apply(mock.ctx, { bridgeRoot: root, protocolVersion: "v2", endpointId: "dsh-endpoint", watchIntervalMs: 300, debugLog: join(root, "trace.log") });
 		try {
-			await new Promise((resolve) => setTimeout(resolve, 3_000));
-			assert.equal(steered.length, 0, "the bystander session does not hand the delivery over");
-			assert.equal(core.getDelivery(root, delivery.deliveryId).state, "queued", "the delivery is left for its own session");
-			assert.equal(core.getDelivery(root, delivery.deliveryId).attempt, 0, "and its attempt count is not inflated by the race");
+			// Ten ticks is more than enough to catch a once-per-tick mutation.
+			await new Promise((resolve) => setTimeout(resolve, 3_500));
+			const after = core.getDelivery(root, delivery.deliveryId);
+			assert.equal(after.state, "queued", "an ineligible session leaves the delivery queued");
+			assert.equal(after.attempt, 0, "and does not increment its attempt counter");
+			assert.equal(core.listDeliveries(root, "claimed").length, 0, "and leaves no claim behind");
+			assert.equal(core.listDispatches(root).length, 0, "and records no dispatch, because nothing was handed over");
 		} finally {
 			mock.dispose();
 		}
@@ -455,6 +464,7 @@ function seedDelivery(root, input) {
 	assert.equal(source.includes("handle.dispose()"), false, "and never disposes the handle it holds, because that would delete the user's session");
 	assert.match(source, /target: \{ actor: peer \}/u, "the reply addresses the peer by actor rather than trusting the binding");
 	assert.match(source, /currentSessionControl=\$\{allowWake\}/u, "the mount line reports the capability, so a stale deployment is distinguishable from a bug");
+	assert.match(source, /receiver=\$\{receiverFingerprint\(\)\}/u, "and reports which build is running, so a stale process is identifiable from the trace");
 	assert.equal(existsSync(join(HERE, "..", "packages", "receiver-dsh", "index.js")), true, "the receiver exists where the tests expect it");
 }
 

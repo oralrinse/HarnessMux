@@ -22,7 +22,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -134,6 +134,42 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** Repository root (two levels above `packages/receiver-dsh/`). */
 const REPO_ROOT = resolve(HERE, "..", "..");
+
+/**
+ * A fingerprint of the receiver code that is actually loaded.
+ *
+ * Added because "which build is this process running?" could not be answered from the runtime, and
+ * that gap cost real time: a defect was investigated against a process that predated the source, and
+ * file mtimes were the only clue. Reading the commit at mount time makes it an answer rather than an
+ * inference.
+ *
+ * Best-effort on purpose — a packaged install may have no `.git`, and a missing fingerprint must
+ * never stop the receiver from mounting. The file's own mtime is the fallback, which at least
+ * distinguishes builds.
+ *
+ * @returns {string} e.g. `commit:9d4452e`, `mtime:2026-10-07T15:11:02.000Z`, or `unknown`.
+ */
+function receiverFingerprint() {
+	try {
+		const head = join(REPO_ROOT, ".git", "HEAD");
+		if (existsSync(head)) {
+			const ref = readFileSync(head, "utf8").trim();
+			if (ref.startsWith("ref: ")) {
+				const refPath = join(REPO_ROOT, ".git", ref.slice(5));
+				if (existsSync(refPath)) return `commit:${readFileSync(refPath, "utf8").trim().slice(0, 7)}`;
+			} else if (ref !== "") {
+				return `commit:${ref.slice(0, 7)}`;
+			}
+		}
+	} catch {
+		// A missing `.git` is normal for a packaged install; fall through to the timestamp.
+	}
+	try {
+		return `mtime:${new Date(statSync(join(HERE, "index.js")).mtimeMs).toISOString()}`;
+	} catch {
+		return "unknown";
+	}
+}
 
 /** The v1 mailbox library; the CLI imports the same file. */
 const CORE_V1_URL = pathToFileURL(join(REPO_ROOT, "packages", "core", "core.mjs")).href;
@@ -365,7 +401,7 @@ export function apply(ctx, config = {}) {
 	// from the trace: an old receiver and a wake-capable one both mounted with the same text, so a
 	// stale deployment looked identical to a bug. `currentSessionControl` is the flag that decides
 	// whether an idle bound session can be woken, so it is the flag worth reporting.
-	diagnose(`apply: root=${root} endpointId=${endpointId} protocol=${protocolVersion} autoWake=${autoWake} currentSessionControl=${allowWake} watchMs=${watchIntervalMs(config)} agentsInjected=${ctx.agents !== undefined}`);
+	diagnose(`apply: root=${root} endpointId=${endpointId} protocol=${protocolVersion} autoWake=${autoWake} currentSessionControl=${allowWake} watchMs=${watchIntervalMs(config)} agentsInjected=${ctx.agents !== undefined} receiver=${receiverFingerprint()}`);
 	if (protocolVersion === "v1" && !mailboxV1?.isBridgeRoot(root)) {
 		ctx.logger?.warn?.(`[harnessmux] no v1 mailbox at ${root} yet — run \`harnessmux init --root "${root}"\` (the tool will also create it on action=init)`);
 	}
@@ -774,6 +810,26 @@ export function apply(ctx, config = {}) {
 			}
 			if (target.sessionId !== undefined && sessionId !== undefined && target.sessionId !== sessionId) {
 				diagnoseOnChange(`skip:${delivery.deliveryId}`, `session:${target.sessionId}`, `pump: skip ${delivery.deliveryId} session ${target.sessionId} != ${sessionId}`);
+				continue;
+			}
+			// A session may only *claim* a delivery it can actually hand over.
+			//
+			// This is eligibility, not ownership: it decides who is allowed to call `claim()`, and the
+			// claim's own atomicity still decides who wins. It exists because `attempt` is incremented
+			// at claim time (core-v2 `claimDelivery`) and nowhere else, so a watcher that claims a
+			// delivery addressed to someone else and then discovers it cannot hand it over burns an
+			// attempt every tick. That is exactly the shape of the reported `attempt=33`: the delivery
+			// was never lost, but its attempt count stopped meaning "a delivery attempt happened".
+			//
+			// The case it catches is the one no other check can: a candidate whose `sessionId` is
+			// unknown — a placeholder for a published-but-unloaded session — must never claim a
+			// delivery that names a different session, because it cannot know it is the addressee.
+			if (target.sessionId !== undefined && (sessionId === undefined || target.sessionId !== sessionId)) {
+				diagnoseOnChange(
+					`ineligible:${delivery.deliveryId}`,
+					`${target.sessionId}`,
+					`pump: ineligible ${delivery.deliveryId} target session ${target.sessionId} vs candidate session ${sessionId ?? "(unresolved)"}`
+				);
 				continue;
 			}
 			// The backoff deadline shrinks every tick, so the remaining time is bucketed
