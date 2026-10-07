@@ -121,12 +121,36 @@ it afterwards. `dispose()` is never called on it (see §7, defect D3).
 
 ## 6. Reply Path
 
-**Current state: the model's own `mailbox`/`reply_message` tool.** This is stated plainly because
-the two must not be confused:
+**Current state: the model's own `mailbox`/`reply_message` tool**, and the return leg is now
+addressed explicitly rather than left to the thread binding.
 
-- **In use now:** the DSH model calls `reply_message` and the reply travels back over protocol v2 to
-  the originating thread. The recipient resolution for that reply — including the loop-back case
-  where a binding points back at the receiving session — is reported by the tool itself.
+Measured, end to end, on one thread:
+
+```text
+1. codex -> dsh   target=session-rt-dsh  mode=delegated  delivery=06f9669f
+2. thread stays bound to the DSH session, exactly as a delegated dispatch leaves it
+3. dsh -> codex   target={"actor":"codex"}  mode=advisory  delivery=c2a8b239
+4. codex hook     mentionsMarker=true  threadShown=true
+     HarnessMux: 1 message(s) from a peer agent are waiting for you (codex).
+     --- [0f5ee6db-…] dsh (report) topic=round trip
+     thread=round-trip-e077748737beacf1 mode=advisory state=queued
+     ROUNDTRIP_MUXX9NF0 — done.
+   non-consuming: reply deliveries still queued = 1
+   deliveries per message: instruction=1 reply=1
+invariants=ok
+```
+
+**Why the target is an actor and not the binding.** While a delegated thread is bound to the DSH
+session, the binding wins — so a reply that trusted it was routed *back into the session that had
+just produced it*, and the asking peer never saw it. The receiver's `reply` now enqueues with
+`target: { actor: peer }`, which addresses the answer to whoever asked, whatever the thread is bound
+to. Both halves are asserted: the answer reaches the peer, and the delegated binding is left
+untouched so everything else on that thread still resolves through it.
+
+This is the "model tool reply" path. It is stated plainly because the two must not be confused:
+
+- **In use now:** the DSH model calls `reply_message`; the reply travels over protocol v2 to the
+  originating thread, and the peer collects it on its next lifecycle event.
 - **Not yet implemented:** automatic final capture. There is no code that reads the assistant's last
   message at `turn_end` and posts a reply by itself.
 
@@ -203,6 +227,22 @@ brief's own instruction.
   only exists in a host with a lifetime; recorded here so the next person does not re-diagnose it as
   a wake-logic bug.
 
+### D5 — the answer travelled back into the harness that produced it
+
+- **Symptom.** With a delegated thread bound to the DSH session, the DSH side's reply was routed to
+  that same session instead of to the peer that had asked. The peer waited and saw nothing.
+- **Evidence.** `dsh -> codex  target={"actor":"dsh","endpointId":"dsh-endpoint","sessionId":"session-rt-dsh"}`
+  — the reply's own delivery pointed back at the session it came from, and `pump: claimed …` then
+  delivered it there.
+- **Root cause.** The reply was enqueued without a target, so routing fell through to the thread
+  binding. A delegated thread is bound to the DSH session by design, so binding-first routing is the
+  wrong resolution for an *answer*: the binding says where work goes, not where a result returns.
+- **Fix.** `reply` enqueues with `target: { actor: peer }`. Explicit actor addressing outranks the
+  binding without rewriting it, so the answer reaches the asker and everything else on the thread
+  keeps resolving through the binding.
+- **Regression test.** `tests/current-session.test.mjs` §7 asserts both halves: the answer is
+  addressed to the peer by actor, and the delegated binding is left intact for other posts.
+
 ---
 
 ## 8. Final Verdict
@@ -211,22 +251,27 @@ brief's own instruction.
 CURRENT SESSION CONTROL PASS WITH DOCUMENTED LIMITATION
 ```
 
-**Why it passes.** On a real host, with the user doing nothing in DSH, a delegated instruction
-addressed to an explicitly bound idle session was claimed, woke that session, opened a turn, and the
-model's own session log contains the marker verbatim. The delivery is `acked` at `attempt=1` with no
-dangling claim, no other session was touched, the bridge invariants hold, and the pre-existing
-runnable suite stayed green throughout.
+**Why it passes.** Both directions were measured on real hosts with the user doing nothing:
+
+- **Codex → DSH.** A delegated instruction addressed to an explicitly bound **idle** session was
+  claimed, the session woke itself (`agent/status -> running`), a turn opened, and the marker was
+  found in that session's own committed event log. The delivery is `acked` at `attempt=1` with
+  `note: "woken"`, no dangling claim, and no other session touched.
+- **DSH → Codex.** The answer on the same thread was addressed to the peer by actor, reached
+  `codex-endpoint`, and Codex's own pickup hook surfaced its body and thread verbatim without
+  consuming it. One delivery per message, invariants `ok`.
+
+The pre-existing runnable suite stayed green throughout (14 suites).
 
 **The documented limitations, stated plainly:**
 
 1. **The reply path is still the model's tool call**, not automatic capture from `turn_end` (§6).
 2. **Turn identity is partial.** The correlation record carries the host's turn *number*
    (`turn: 1`), but the host exposed no independent turn id at hand-off, so `turnId` is recorded as
-   `null` rather than invented. This is enough to say which turn a delivery caused, and not enough
-   to address that turn later.
+   `null` rather than invented.
 3. **Worst-case wake latency is the watch interval** — 10 s by default, configurable (§7 D4).
 4. **The wake depends on the session still existing.** If the user deletes the bound session, the
    delegated delivery stays queued and reports the reason; nothing is guessed.
-5. **C8 was not re-measured in this stage.** The Codex lifecycle hook path is unchanged and was
-   verified in P3.2; re-running it requires a Codex client to be driven, which is a separate
-   acceptance.
+5. **C8 was verified against the hook, not against a model.** The pickup hook's output carries the
+   answer, which is the mechanism Codex consumes; driving a real Codex turn to show the model
+   quoting it is a client-side acceptance and was done in P3.2, not re-run here.

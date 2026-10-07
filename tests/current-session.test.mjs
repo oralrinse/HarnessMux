@@ -305,11 +305,42 @@ function seedDelivery(root, input) {
 	}
 }
 
-// --- 7. the plugin file itself stays tied to the documented contract -------------
+// --- 7. the return leg does not depend on how the thread is bound ----------------
+// Observed before this existed: a delegated thread stays bound to the DSH session, so binding-first
+// routing sent the answer *back into the session that had just produced it* — the sender never saw
+// it. Addressing the reply by actor fixes that without touching the binding, and both halves are
+// asserted so a future change cannot quietly reintroduce the loop.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-return-"));
+	core.ensureBridge(root, { remember: false });
+	core.registerEndpoint(root, { actor: "codex", endpointId: "codex-endpoint", transport: "mcp-stdio", sessions: ["session-cx"], remember: false });
+	try {
+		core.bindThread(root, { threadId: "t-return", endpointId: "dsh-endpoint", sessionId: "session-dsh", mode: "delegated" });
+		const instruction = core.postMessage(root, { from: "codex", threadId: "t-return", topic: "x", kind: "instruction", body: "do it" });
+		const answer = core.postMessage(root, { from: "dsh", threadId: "t-return", topic: "x", kind: "report", replyTo: instruction.messageId, body: "done" });
+
+		// What the receiver's `reply` now does.
+		const addressed = core.enqueueDelivery(root, { messageId: answer.messageId, target: { actor: "codex" } });
+		assert.equal(addressed.target.actor, "codex", "the answer is addressed to the peer that asked");
+		assert.equal(addressed.target.endpointId, undefined, "by actor, not by this harness's own endpoint");
+
+		// The binding is untouched, so anything else on the thread still resolves through it.
+		assert.equal(core.getBinding(root, "t-return").endpointId, "dsh-endpoint", "the delegated binding is not rewritten by replying");
+		const other = core.enqueueDelivery(root, { messageId: instruction.messageId });
+		assert.equal(other.target.endpointId, "dsh-endpoint", "other posts on the thread still follow the binding");
+
+		assert.equal(core.verifyInvariants(root).ok, true, "the bridge invariants hold");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 8. the plugin file itself stays tied to the documented contract -------------
 {
 	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
 	assert.match(source, /resumeSessionId/u, "the wake path uses resume's own option name");
 	assert.equal(source.includes("handle.dispose()"), false, "and never disposes the handle it holds, because that would delete the user's session");
+	assert.match(source, /target: \{ actor: peer \}/u, "the reply addresses the peer by actor rather than trusting the binding");
 	assert.equal(existsSync(join(HERE, "..", "packages", "receiver-dsh", "index.js")), true, "the receiver exists where the tests expect it");
 }
 

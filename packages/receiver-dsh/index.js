@@ -561,8 +561,15 @@ export function apply(ctx, config = {}) {
 					replyTo: parent.messageId,
 					body
 				});
-				const delivery = mailboxV2.enqueueDelivery(root, { messageId: message.messageId });
-				return value(`replied [${message.messageId}] on thread=${message.threadId}\ndelivery=${delivery.deliveryId} target=${delivery.target ? `${delivery.target.endpointId ?? delivery.target.actor}` : "UNROUTED (awaiting a binding)"}`);
+				// The reply is addressed to the peer that asked, explicitly.
+				//
+				// Leaving this to the thread binding is what made the return leg travel *back into
+				// this harness*: while a delegated thread is bound to the DSH session, the binding
+				// wins, so the answer was routed to the session that had just produced it. Naming the
+				// actor makes the return leg hold however the thread is bound, and anything else
+				// posted on that thread still resolves through the binding independently.
+				const delivery = mailboxV2.enqueueDelivery(root, { messageId: message.messageId, target: { actor: peer } });
+				return value(`replied [${message.messageId}] on thread=${message.threadId}\ndelivery=${delivery.deliveryId} target=${delivery.target ? `${delivery.target.actor ?? ""}@${delivery.target.endpointId ?? "(no endpoint)"}` : "UNROUTED (awaiting a binding)"} mode=${delivery.mode}\nAddressed to ${peer} by actor, so the answer reaches the peer that asked rather than looping back here.`);
 			}
 			case "done":
 				return value("in v2 a delivery is completed by the pump (claim → steer → ack); there is nothing for the tool to consume");
