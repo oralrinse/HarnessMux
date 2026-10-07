@@ -828,6 +828,11 @@ if (patch.includes(`name: '${PACKAGE_NAME}'`) || patch.includes(`name: "${PACKAG
 		`        bridgeRoot: ${yamlPath(bridge)}`,
 		"        actor: dsh",
 		"        peer: codex",
+		// Protocol v2 is the current protocol, so a fresh install gets it rather than v1. The
+		// `endpointId` is this harness's routing identity; without it the receiver invents
+		// `<actor>-endpoint` and every binding has to name that invented value.
+		"        protocolVersion: v2",
+		"        endpointId: dsh-endpoint",
 		"        autoWake: true",
 		""
 	].join("\n");
@@ -858,4 +863,4 @@ if (!dryRun) {
 	}
 }
 
-process.stdout.write(`\nNext: restart the harness so the plugin mounts (a profile reload also works: \`${dshCommand()}\` from the profile).\nThen verify:\n  node "${join(REPO_ROOT, "packages", "cli", "mailbox.mjs")}" status\n  and ask the agent to run \`mailbox action=status\`.\n`);
+process.stdout.write(`\nNext: restart the harness so the plugin mounts (a mounted plugin is not hot-reloaded; a profile reload also works: \`${dshCommand()}\` from the profile).\nThen verify:\n  node "${join(REPO_ROOT, "packages", "cli", "mailbox-v2.mjs")}" --root "${bridge}" status\n  and ask the agent to run \`mailbox action=status\`.\n\nIf you want to confirm the wake capability is actually loaded, read the trace after the restart:\n  apply: root=… protocol=v2 autoWake=true currentSessionControl=true …\n\`currentSessionControl=true\` means a delegated delivery to an explicitly bound idle session can\nopen a turn by itself; a missing flag means the process predates the feature.\n`);
