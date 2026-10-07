@@ -1190,9 +1190,17 @@ export function apply(ctx, config = {}) {
 		}
 		if (typeof agent.followup !== "function") throw new Error("this session's agent cannot be woken (no followup)");
 		// `followup()` wakes an idle driver and opens a turn boundary; `inject()` deliberately does
-		// not, which is why the waking call is this one. It is synchronous by contract, so a throw
-		// here rejects the wake and the delivery is released instead of being acked.
-		agent.followup(makeUserMessage(text));
+		// not, which is why the waking call is this one.
+		//
+		// It is awaited because it is asynchronous, and discarding its promise was a real defect: a
+		// failure to open the turn became an unhandled rejection while `wakeAgent` still resolved, so
+		// the delivery was ACKed and the execution record stayed at `dispatching` forever. Observed on
+		// a real host as "ACKed but no turn ever opened". Awaiting turns that silence into a rejection
+		// that releases the delivery, which is the behaviour the contract already promised.
+		//
+		// A synchronous throw is still possible and still has to reject this function, which awaiting
+		// covers for both cases.
+		await agent.followup(makeUserMessage(text));
 		return agent;
 	}
 

@@ -283,4 +283,21 @@ withRoot((root) => {
 	assert.match(source, /ctx\.on\("agent\/assistant-stream", captureAssistantFrame\)/u, "and the stream is subscribed once");
 }
 
+// --- M11. a wake that fails to open a turn must not be acked as success ------
+// Observed on a real host as "the delivery was ACKed but no turn ever opened": `followup()` is
+// asynchronous, and its promise was discarded, so a rejected attempt to open the turn became an
+// unhandled rejection while the wake still resolved. The delivery was acknowledged, the execution
+// record stayed at `dispatching`, and nothing anywhere reported a problem.
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	// The call must be awaited. A bare `agent.followup(` preceded by `await` is what makes the
+	// difference, so the assertion is on the awaited form rather than on the word alone.
+	assert.match(source, /await agent\.followup\(makeUserMessage\(text\)\)/u, "the wake awaits the turn boundary it opens");
+	assert.equal(
+		/(?<!await )\bagent\.followup\(makeUserMessage\(text\)\)/u.test(source.replace(/await agent\.followup\(makeUserMessage\(text\)\)/gu, "")),
+		false,
+		"and no discarded followup promise remains"
+	);
+}
+
 console.log("mapping.test.mjs: all assertions passed");
