@@ -39,6 +39,33 @@ Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
 | 让同伴 agent 反过来问你 | 双向线程；回复留在同一 thread |
 | 同时保证安全 | `advisory` / `delegated` 信任分级，由 binding 决定 |
 
+### 完整闭环
+
+整套东西的意义在于：**你不需要碰 DSH，DSH 就会干活**。双向均已在真机验证：
+
+```text
+你在 Codex 里说：用 HarnessMux 让当前 DSH 会话回复 CURRENT_SESSION_OK_7F3A
+   │
+   ├─ Codex 调用 send_message ──► 桥 ──► DSH receiver
+   │                                        │
+   │                          线程已绑定到该会话，mode=delegated
+   │                                        │
+   │                          会话 idle？──► resume + followup ──► 自动开启一个 turn
+   │                                        │      （你可以在 DSH 界面里看着它跑）
+   │                                        │
+   │                          投递 acked，note=woken，attempt=1
+   │                                        │
+   ◄─ reply_message（按 actor 寻址回提问者）┘
+   │
+   └─ Codex 下一次 SessionStart / UserPromptSubmit 把结果作为上下文呈现
+```
+
+实际含义：
+
+- **你不需要在 DSH 里按回车。** 发给「已显式绑定且 delegated 的空闲会话」的指令会自己开启回合；最坏延迟为一个 watch 周期（默认 10 秒，可用 `watchIntervalMs` 调整）。
+- **你能看着它干。** 工作发生在真实会话里，有真实对话记录（模型输出与工具调用），不是隐藏 worker。
+- **只有被授权的绑定才会唤醒任何东西。** 需要 `delegated` 投递 **且** `delegated` 绑定。发给普通会话的 `advisory` 留言仍然等你，未绑定的线程保持未绑定而不会被猜。
+- **回复自动回到原线程**，按 actor 寻址给提问方，Codex 在下一个生命周期事件取走。Codex 空闲时无法被唤醒——这是宿主边界，本项目不做虚假承诺。
 ### 与「worker 编排器」的区别
 
 外部编排器的做法是：派一个任务，然后**启动并管理一个 worker** 去跑。
@@ -65,7 +92,9 @@ Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
 
 | 边界 | 说明 |
 |---|---|
-| **没有 idle 唤醒** | 只有会话在运行时才会投递。空闲会话不会被唤醒，投递会等待。*运行中 → 近实时；空闲 → 等它下次运行。* |
+| **空闲唤醒需要授权** | 只有 `delegated` 投递 **且** 该线程是显式 `delegated` 绑定时，才会唤醒空闲会话并开启回合。发给普通会话的 `advisory` 留言仍然等你，没有绑定的投递保持排队。这是刻意的：同伴的留言不应夺走人正在用的会话。 |
+| **唤醒最坏延迟** | 一个 watch 周期——默认 10 秒，可按 profile 行配置 `watchIntervalMs`，下限 250ms。 |
+| **结果目前由模型调用工具返回** | DSH 模型调用 `reply_message`；在 `turn_end` 自动捕获最终回复**尚未实现**（[为何可达](docs/REPORT-current-session-control.md)）。 |
 | **不是 exactly-once** | 传输层按设计是 at-least-once，消费方需容忍重复的 deliveryId。 |
 | **Codex 与 Claude Code 之外的客户端** | **计划中**（P3.4）。Codex 与 Claude Code 均已真机端到端验证（见「接入客户端」）；其它客户端只有在按同样标准验证后才会列出。 |
 | **只有一个 receiver** | DeepSeek Harness 是唯一已实现的 receiver。Receiver 接口只是规范，尚未落地（[receiver-api.md](docs/receiver-api.md)）。 |
@@ -95,7 +124,7 @@ node examples/live/ask-session.mjs <sessionId> --marker HELLO-1
 # 该会话跑回合期间，状态从 queued 变成 acked
 ```
 
-投递落在"pump 跳动（每 10 秒）时该会话仍在运行"的那个回合里。会话空闲时它会正确地等在 `queue/`——见上面的边界。
+`delegated` 且已绑定：会话空闲也会被唤醒（`note=woken`）。`advisory` 或无绑定：投递正确地等在 `queue/`，直到该会话在运行一个回合——见上面的边界。
 
 ## 装进 DeepSeek Harness
 
