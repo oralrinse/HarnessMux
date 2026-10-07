@@ -21,7 +21,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -208,10 +208,132 @@ function isOurHook(hook) {
  *   3. `~/.codex/hooks.json` — the two lifecycle hooks, merged into whatever is already
  *      there, and removed by exact ownership on uninstall.
  *
+/**
+ * An absolute path to a node executable the Codex host can actually start.
+ *
+ * `.mcp.json` used to say `"command": "node"`, which relies on PATH. The Codex CLI resolves that
+ * because it inherits a user shell's PATH; the Codex **desktop app** does not, and its own log
+ * records the consequence:
+ *
+ *   mcp_extension_tool_discovery_failed error="MCP startup failed: No such file or directory
+ *   (os error 2)" pluginId=harnessmux@harnessmux server=harnessmux
+ *
+ * The plugin was installed, enabled and *discovered*, and its server was never started. An
+ * absolute path removes the dependency on the host's PATH, and every candidate below exists
+ * because this machine's harness or Codex itself ships it.
+ *
+ * @returns {string|null} an absolute node path, or null when none can be found.
+ */
+function resolveNodeForMcp() {
+	const explicit = process.env.HARNESSMUX_NODE?.trim() || process.env.CODEX_MCP_NODE_PATH?.trim();
+	if (explicit && existsSync(explicit)) return explicit;
+	// A system installation is preferred over whatever node happens to be running this script:
+	// the plugin has to keep working when the editor, or the shell that ran the installer, is
+	// gone. Candidate order is "stable first, incidental last".
+	const candidates = [
+		"C:\\Program Files\\nodejs\\node.exe",
+		join(homedir(), "AppData", "Roaming", "npm", "node.exe"),
+		join(homedir(), "AppData", "Local", "Programs", "nodejs", "node.exe"),
+		join(process.env["ProgramFiles"] ?? "C:\\Program Files", "nodejs", "node.exe")
+	];
+	// The Codex desktop app ships a node runtime; the versioned directory is discovered rather
+	// than pinned, so a Codex update does not invalidate this.
+	const runtimes = join(homedir(), "AppData", "Local", "OpenAI", "Codex", "runtimes", "cua_node");
+	try {
+		for (const entry of readdirSync(runtimes)) candidates.push(join(runtimes, entry, "bin", "node.exe"));
+	} catch {
+		// No bundled runtime is a normal outcome on a machine without the desktop app.
+	}
+	// Last resort: the interpreter running this script. On a machine with no system-wide node —
+	// this one, for example, where the only node belongs to an editor's toolchain — this is what
+	// gets written, and it is a genuinely fragile choice: moving or removing that editor breaks
+	// the MCP server. It is preferred over nothing, and `HARNESSMUX_NODE` overrides it.
+	candidates.push(process.execPath);
+	for (const candidate of candidates) {
+		if (typeof candidate === "string" && candidate !== "" && existsSync(candidate)) return candidate;
+	}
+	return null;
+}
+
+/**
+ * Point the copies Codex actually loads at an absolute node.
+ *
+ * The repository keeps `"command": "node"` on purpose: an absolute path there would leak one
+ * machine's layout into a published repo, differ per contributor, and be wrong the moment an
+ * editor moves. Codex loads from its own cache, so the absolute path belongs there, regenerated
+ * on every install.
+ *
+ * Codex stores plugins as `<CODEX_HOME>/plugins/cache/<marketplace>/<plugin>/<version>/`, so the
+ * cache is walked rather than assumed — a version bump must not leave the fix behind.
+ *
+ * @param {string|null} node - absolute node path to write; null disables the rewrite.
+ * @returns {{node: string|null, files: string[], changed: number}} what was found and updated.
+ */
+function refreshCachedMcpConfigs(node) {
+	const files = [];
+	if (node === null) return { node, files, changed: 0 };
+	const walk = (dir, depth) => {
+		// `<cache>/<marketplace>/<plugin>/<version>/.mcp.json` is depth 4 from the cache root, so
+		// the limit has to leave room for the file itself; a tighter bound silently found nothing.
+		if (depth > 5) return;
+		let entries;
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch (error) {
+			// A missing directory is normal. A *programming* error here is not, and swallowing it
+			// cost a debugging round trip: `readdirSync` was not imported, the walk found zero
+			// files, and the installer reported "no Codex plugin cache yet" while one existed. So
+			// only silence the expected case.
+			if (error?.code === "ENOENT" || error?.code === "EACCES" || error?.code === "EPERM") return;
+			throw error;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const path = join(dir, entry.name);
+			if (existsSync(join(path, ".mcp.json"))) files.push(join(path, ".mcp.json"));
+			walk(path, depth + 1);
+		}
+	};
+	walk(join(codexHome(), "plugins", "cache"), 0);
+	let changed = 0;
+	for (const file of files) {
+		let config;
+		try {
+			config = JSON.parse(readFileSync(file, "utf8"));
+		} catch {
+			continue;
+		}
+		const server = config?.mcpServers?.harnessmux;
+		if (!server || server.command === node) continue;
+		server.command = node;
+		if (!dryRun) {
+			backup(file);
+			writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+		}
+		changed += 1;
+	}
+	return { node, files, changed };
+}
+
+/**
+ * Install, upgrade or remove the Codex side of HarnessMux.
+ *
+ * Owns three things and touches nothing else:
+ *
+ *   1. `~/.codex/harnessmux.json`  — where this checkout is, so the plugin's launcher
+ *      can find the MCP server even after Codex copies the plugin into its cache;
+ *   2. `~/.codex/skills/harnessmux/SKILL.md` — a copy of the one shared skill. It is a
+ *      copy on purpose: the source of truth stays in `packages/portable-plugin`, and
+ *      re-running the installer is what refreshes it, so the two cannot drift silently;
+ *   3. `~/.codex/hooks.json` — the two lifecycle hooks, merged into whatever is already
+ *      there, and removed by exact ownership on uninstall.
+ *
+ * It also points the plugin's `.mcp.json` at an absolute node (see `resolveNodeForMcp`), because
+ * the desktop host does not inherit a PATH that resolves `node`.
+ *
  * @returns {Promise<void>} resolves when the change is applied or reported.
  */
-async function installCodexAdapter() {
-	const paths = codexPaths();
+async function installCodexAdapter() {	const paths = codexPaths();
 	const remove = options.uninstall === true;
 	const skillSource = join(REPO_ROOT, "packages", "portable-plugin", "skills", "harnessmux", "SKILL.md");
 
@@ -292,7 +414,17 @@ async function installCodexAdapter() {
 	}
 	process.stdout.write(`${dryRun ? "[dry-run] " : ""}${skillChanged ? "installed" : "already current"}: ${paths.skill}\n`);
 
-	// 3. the lifecycle hooks, merged rather than overwritten.
+	// 3. point the copies Codex actually loads at an absolute node.
+	const mcp = refreshCachedMcpConfigs(resolveNodeForMcp());
+	if (mcp.node === null) {
+		process.stderr.write("harnessmux: no node executable found, so the MCP server cannot be started by a host without node on PATH.\nSet HARNESSMUX_NODE to an absolute node path and re-run.\n");
+	} else if (mcp.files.length === 0) {
+		process.stdout.write(`${dryRun ? "[dry-run] " : ""}no Codex plugin cache yet; \`codex plugin add harnessmux@harnessmux\` will copy the manifest, then re-run this installer to fix its node path\n`);
+	} else {
+		process.stdout.write(`${dryRun ? "[dry-run] " : ""}${mcp.changed > 0 ? `updated ${mcp.changed}` : "already correct"}: node = ${mcp.node} in ${mcp.files.length} cached plugin file(s)\n`);
+	}
+
+	// 4. the lifecycle hooks, merged rather than overwritten.
 	let hooksDoc = { hooks: {} };
 	if (existsSync(paths.hooks)) {
 		try {
@@ -323,12 +455,12 @@ async function installCodexAdapter() {
 		"  1. add this repository as a local marketplace and install the plugin:",
 		`       codex plugin marketplace add "${REPO_ROOT}"`,
 		"       codex plugin add harnessmux@harnessmux",
-		"  2. drive it from the Codex CLI. The desktop/VS Code app does not load MCP servers at",
-		"     all — not this plugin's, and not any server in config.toml either — so a task must",
-		"     be delegated from the CLI, where the tools are registered.",
+		"  2. re-run this installer afterwards: `codex plugin add` copies the manifest into Codex's",
+		"     cache, and this step points that copy at an absolute node (the desktop host has no",
+		"     node on PATH, and a bare \"node\" makes its MCP server fail to start).",
 		"",
-		"Verify from the CLI: ask Codex to call `get_status`; the run prints",
-		"  mcp: harnessmux/get_status started / completed",
+		"Then drive it from Codex (CLI or desktop). Verify with a call to `get_status`; the run",
+		"prints:  mcp: harnessmux/get_status started / completed",
 		""
 	].join("\n"));
 }

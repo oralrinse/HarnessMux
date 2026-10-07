@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as core from "../packages/core/core-v2.mjs";
 
@@ -202,6 +202,45 @@ function runHook(bridgeRoot, extraEnv = {}) {
 		const afterUninstall = readJson(hooksPath);
 		assert.deepEqual(afterUninstall, foreign, "hooks.json is back to exactly the user's content");
 		assert.equal(JSON.stringify(afterUninstall).includes("pending.mjs"), false, "no harnessmux hook is left behind");
+	} finally {
+		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 6. the MCP command must not depend on the host's PATH ----------------------
+// A bare `"command": "node"` works for the CLI, which inherits a user shell's PATH, and fails
+// for the Codex desktop app, which does not. Its log said exactly that:
+//   mcp_extension_tool_discovery_failed error="MCP startup failed: No such file or directory
+//   (os error 2)" pluginId=harnessmux@harnessmux server=harnessmux
+// The plugin was installed, enabled and discovered — and never started.
+{
+	// The repository keeps a portable template; an absolute path here would leak a machine's
+	// layout into a published repo.
+	const template = readJson(join(ADAPTER, ".mcp.json"));
+	assert.equal(template.mcpServers.harnessmux.command, "node", "the tracked template stays portable");
+
+	const codexHome = mkdtempSync(join(tmpdir(), "hxmux-codex-node-"));
+	const cacheDir = join(codexHome, "plugins", "cache", "harnessmux", "harnessmux", "0.2.0");
+	const cachedFile = join(cacheDir, ".mcp.json");
+	const env = { ...process.env, CODEX_HOME: codexHome };
+	const run = (...args) => execFileSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env });
+
+	try {
+		// Exactly what `codex plugin add` leaves behind: a copy of the portable template.
+		mkdirSync(cacheDir, { recursive: true });
+		writeFileSync(cachedFile, `${JSON.stringify(template, null, 2)}\n`, "utf8");
+		assert.equal(readJson(cachedFile).mcpServers.harnessmux.command, "node", "the cache starts with the unstartable command");
+
+		const output = run("--codex");
+		assert.match(output, /cached plugin file/u, "the installer reports the cached copies it inspected");
+		const repaired = readJson(cachedFile).mcpServers.harnessmux.command;
+		assert.notEqual(repaired, "node", "the installed copy no longer relies on PATH");
+		assert.equal(isAbsolute(repaired), true, `the command is an absolute path (got ${JSON.stringify(repaired)})`);
+		assert.equal(existsSync(repaired), true, "and that path exists on this machine");
+
+		// Idempotent, and it never rewrites the tracked template.
+		assert.match(run("--codex"), /already correct/u, "a second install finds nothing to change");
+		assert.equal(readJson(join(ADAPTER, ".mcp.json")).mcpServers.harnessmux.command, "node", "the repository template is still portable");
 	} finally {
 		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}

@@ -174,18 +174,15 @@ Two things worth knowing, both found by running it rather than by reading about 
   the installer writes them into `~/.codex/hooks.json` instead, with **absolute** paths:
   Codex resolves a hook command against `~/.codex`, not against the plugin root, and a
   relative command there fails with `Cannot find module`.
-- **MCP tools are loaded by the CLI, not by the Codex desktop/VS Code app.** Measured on this
-  machine: every `codex exec` session registers the server and its calls appear as
-  `mcp: harnessmux/get_status started/completed`, while across **54 desktop sessions**
-  (`originator=codex_work_desktop`, `source=vscode`) no MCP call is ever logged. What the
-  desktop app *does* expose is its own bundled server — sessions reference
-  `mcp__codex_app__load_workspace_dependencies` — so it mounts a curated set, not the ones a
-  plugin or `config.toml` declares. The globally configured `node_repl` is absent there for the
-  same reason, which is what rules out a HarnessMux-specific cause. In the desktop app the model
-  can still *read* the skill, which is why it can describe HarnessMux while having no tools to
-  call. **Delegate from the Codex CLI**, or use another verified client (Claude Code). Whether
-  the desktop profile can be pointed at third-party MCP servers is a question about that app,
-  not about this plugin.
+- **The MCP command is addressed by absolute path, because the desktop host has no node on its
+  PATH.** `.mcp.json` says `"command": "node"`, which the CLI resolves and the Codex desktop app
+  does not — its log recorded `mcp_extension_tool_discovery_failed … "MCP startup failed: No such
+  file or directory (os error 2)" pluginId=harnessmux@harnessmux`. The plugin was installed,
+  enabled and *discovered*, and its server was never started. `scripts/install.mjs --codex`
+  therefore rewrites the copies Codex loads with an absolute node (preferring a system install,
+  then the runtime Codex itself ships; `HARNESSMUX_NODE` overrides the choice). The repository
+  keeps the portable template — an absolute path there would publish one machine's layout.
+  Re-run the installer after `codex plugin add` so the cached copy gets the absolute path.
 
 The pick-up hook is a *pull*: it lists what is waiting and never consumes it, so an idle
 Codex is not woken — it simply loses nothing. `node scripts/install.mjs --codex --uninstall`
