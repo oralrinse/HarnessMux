@@ -13,6 +13,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -457,7 +458,71 @@ function seedDelivery(root, input) {
 	}
 }
 
-// --- 10. the plugin file itself stays tied to the documented contract -----------
+// --- 10. a resend must not become a second task -------------------------------
+// Observed in practice: a commander sent a task, waited, decided it had not been picked up, and sent
+// the same task again — so the executor ran it twice. A pending delivery is not a failed one.
+//
+// Two independent guarantees are asserted, because either alone leaves the hole open: the idempotency
+// key stops a duplicate *logical* task, and waiting never creates anything at all.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-idempotency-"));
+	core.ensureBridge(root, { remember: false });
+	try {
+		const requestId = `commander-task-${randomUUID()}-step-01`;
+		const first = core.postMessage(root, { from: "dsh", clientRequestId: requestId, topic: "resend", kind: "instruction", body: "do the thing" });
+		core.enqueueDelivery(root, { messageId: first.messageId, actor: "codex", endpointId: "codex-endpoint", sessionId: "session-x", mode: "delegated" });
+
+		const seen = core.findMessageByRequestId(root, { from: "dsh", clientRequestId: requestId });
+		assert.notEqual(seen, null, "the original submission is found by its request id");
+		assert.equal(seen.messageId, first.messageId, "and it is the same message, not a new one");
+		assert.equal(core.listMessages(root).length, 1, "so exactly one logical message exists");
+		assert.equal(core.listDeliveries(root, "queued").length, 1, "and exactly one delivery");
+
+		// A different actor, a different thread, and an absent key must all be different work.
+		assert.equal(core.findMessageByRequestId(root, { from: "someone-else", clientRequestId: requestId }), null, "the same key from another actor is a different task");
+		assert.equal(core.findMessageByRequestId(root, { from: "dsh", clientRequestId: requestId, threadId: "another-thread" }), null, "and the same key in another thread is a different task");
+		assert.equal(core.findMessageByRequestId(root, { from: "dsh", clientRequestId: "" }), null, "an empty key suppresses nothing");
+		assert.equal(core.findMessageByRequestId(root, { from: "dsh" }), null, "and neither does a missing one");
+
+		// Identical body text WITHOUT the key must still create a second task: content is not identity.
+		const noKey = core.postMessage(root, { from: "dsh", topic: "resend", kind: "instruction", body: "do the thing" });
+		assert.notEqual(noKey.messageId, first.messageId, "identical text without a request id is genuinely new work");
+		assert.equal(core.listMessages(root).length, 2, "and it is recorded as such");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 11. waiting is read-only -------------------------------------------------
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-wait-"));
+	core.ensureBridge(root, { remember: false });
+	try {
+		const task = core.postMessage(root, { from: "dsh", topic: "wait semantics", kind: "instruction", body: "please work" });
+		const before = { messages: core.listMessages(root).length, deliveries: core.listDeliveries(root, "queued").length };
+
+		// A wait that finds nothing must not fabricate a message or a delivery, whatever its budget.
+		const found = core.listMessages(root).filter((m) => m.threadId === task.threadId && m.from !== "dsh" && m.createdAt > task.createdAt);
+		assert.equal(found.length, 0, "no reply exists yet");
+		assert.equal(core.listMessages(root).length, before.messages, "and a wait adds no message");
+		assert.equal(core.listDeliveries(root, "queued").length, before.deliveries, "and no delivery");
+
+		// A reply that arrives later is found, and only that one.
+		const older = core.postMessage(root, { from: "codex", threadId: task.threadId, topic: task.topic, kind: "note", body: "older note" });
+		const newer = core.postMessage(root, { from: "codex", threadId: task.threadId, topic: task.topic, kind: "answer", body: "the result" });
+		const afterOlder = core.listMessages(root).filter((m) => m.threadId === task.threadId && m.from !== "dsh" && m.createdAt > older.createdAt);
+		assert.deepEqual(afterOlder.map((m) => m.messageId), [newer.messageId], "waiting after a message returns only what follows it");
+
+		// Another thread answering must not be mistaken for this thread's reply.
+		const other = core.postMessage(root, { from: "codex", topic: "unrelated", kind: "answer", body: "different thread" });
+		const onThread = core.listMessages(root).filter((m) => m.threadId === task.threadId && m.from !== "dsh" && m.createdAt > task.createdAt);
+		assert.equal(onThread.some((m) => m.messageId === other.messageId), false, "a reply on another thread is not this thread's reply");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 12. the plugin file itself stays tied to the documented contract -----------
 {
 	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
 	assert.match(source, /resumeSessionId/u, "the wake path uses resume's own option name");
@@ -465,6 +530,9 @@ function seedDelivery(root, input) {
 	assert.match(source, /target: \{ actor: peer \}/u, "the reply addresses the peer by actor rather than trusting the binding");
 	assert.match(source, /currentSessionControl=\$\{allowWake\}/u, "the mount line reports the capability, so a stale deployment is distinguishable from a bug");
 	assert.match(source, /receiver=\$\{receiverFingerprint\(\)\}/u, "and reports which build is running, so a stale process is identifiable from the trace");
+	assert.match(source, /duplicateSuppressed=true/u, "the send path reports suppression instead of silently returning an old message");
+	assert.match(source, /status=timeout/u, "and a wait reports a timeout as a fact rather than as a failure");
+	assert.match(source, /DEFAULT_WATCH_INTERVAL_MS = 2_000/u, "the interactive watch interval stays at 2s unless a profile overrides it");
 	assert.equal(existsSync(join(HERE, "..", "packages", "receiver-dsh", "index.js")), true, "the receiver exists where the tests expect it");
 }
 

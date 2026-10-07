@@ -338,12 +338,49 @@ export function postMessage(root, input) {
 		threadId: input.threadId?.trim() || `${slug(topic)}-${shortHash(topic)}`,
 		kind,
 		...(input.replyTo ? { replyTo: requireName(input.replyTo, "replyTo") } : {}),
+		// Recorded so a repeat submission can be recognised rather than duplicated. Descriptive
+		// metadata on an immutable record: it never affects routing, claiming or delivery.
+		...(typeof input.clientRequestId === "string" && input.clientRequestId.trim() !== ""
+			? { clientRequestId: input.clientRequestId.trim() }
+			: {}),
 		...(Array.isArray(input.refs) && input.refs.length > 0 ? { refs: input.refs } : {}),
 		body
 	};
 	writeJsonExclusive(join(root, "messages", `${messageId}.json`), message);
 	audit(root, { event: "message.posted", messageId, from: message.from, kind, threadId: message.threadId });
 	return message;
+}
+
+/**
+ * Find a message by the client's own request id, scoped to its author and thread.
+ *
+ * The second line of defence against a duplicate task. The first is the client behaving correctly,
+ * but a client that times out and resends is a real failure mode observed in practice: a commander
+ * sent a task, waited, decided it had not been picked up, and sent the same task again — so the
+ * executor ran it twice. **A pending delivery is not a failed delivery**, and no timeout should be
+ * able to create a second one.
+ *
+ * The scope is deliberately narrow. `from` + `threadId` + `clientRequestId` identifies one logical
+ * submission, so the same key in a different thread or from a different actor is a different task and
+ * is not suppressed. The body is never hashed: two genuinely different tasks may legitimately carry
+ * identical text, and suppressing on content would silently drop real work.
+ *
+ * @param {string} root - bridge root.
+ * @param {object} input - `from`, `clientRequestId`, and optional `threadId`.
+ * @returns {object|null} the already-posted message, or null.
+ */
+export function findMessageByRequestId(root, input = {}) {
+	const requestId = typeof input.clientRequestId === "string" ? input.clientRequestId.trim() : "";
+	if (requestId === "") return null;
+	const from = typeof input.from === "string" ? input.from.trim() : "";
+	const threadId = typeof input.threadId === "string" ? input.threadId.trim() : "";
+	for (const message of listMessages(root)) {
+		if (message.clientRequestId !== requestId) continue;
+		if (message.from !== from) continue;
+		if (threadId !== "" && message.threadId !== threadId) continue;
+		return message;
+	}
+	return null;
 }
 
 /** Read one immutable message by id. */

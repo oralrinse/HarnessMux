@@ -159,7 +159,12 @@ export const TOOLS = [
 				endpoint_id: { type: "string", description: "Explicit target endpoint; overrides the binding." },
 				session_id: { type: "string", description: "Explicit target session; overrides the binding." },
 				mode: { type: "string", enum: ["advisory", "delegated"], description: "Trust mode for the delivery." },
-				expect_reply: { type: "boolean", description: "Mark the message as waiting for an answer." }
+				expect_reply: { type: "boolean", description: "Mark the message as waiting for an answer." },
+				client_request_id: {
+					type: "string",
+					description:
+						"Your own id for this submission, e.g. commander-task-<uuid>-step-01. Sending the same id again returns the original message and its existing delivery instead of creating a duplicate task. Supply it for anything you might retry: a pending delivery is not a failed one, and resending on a timeout makes the executor do the work twice."
+				}
 			},
 			required: ["body"],
 			additionalProperties: false
@@ -168,11 +173,39 @@ export const TOOLS = [
 			const bridge = root();
 			const body = String(args.body ?? "").trim();
 			if (!body) throw new ToolError("body must not be empty");
+			const from = typeof args.from === "string" && args.from.trim() ? args.from.trim() : DEFAULT_ACTOR;
+			const requestId = typeof args.client_request_id === "string" ? args.client_request_id.trim() : "";
+
+			// Suppression is checked here as well as in the receiver, because a client that retries may
+			// never reach the receiver's send action at all: it calls this tool again.
+			if (requestId !== "") {
+				const existing = core.findMessageByRequestId(bridge, { from, clientRequestId: requestId });
+				if (existing !== null) {
+					const open = core
+						.listDeliveries(bridge, "queued")
+						.concat(core.listDeliveries(bridge, "claimed"))
+						.find((row) => row.messageId === existing.messageId);
+					return {
+						text:
+							`duplicateSuppressed=true: this client_request_id was already sent as [${existing.messageId}] on thread ${existing.threadId}.\n` +
+							(open ? `Its delivery ${open.deliveryId} is still open (attempt ${open.attempt ?? 0}).\n` : "") +
+							"Nothing new was created. Do not resend — wait on this thread instead.",
+						structured: {
+							messageId: existing.messageId,
+							threadId: existing.threadId,
+							deliveryId: open?.deliveryId ?? null,
+							duplicateSuppressed: true
+						}
+					};
+				}
+			}
+
 			const message = core.postMessage(bridge, {
-				from: typeof args.from === "string" && args.from.trim() ? args.from.trim() : DEFAULT_ACTOR,
+				from,
 				topic: args.topic,
 				threadId: args.thread_id,
 				kind: args.kind,
+				clientRequestId: requestId || undefined,
 				body
 			});
 			const explicit = args.endpoint_id !== undefined || args.session_id !== undefined
@@ -185,7 +218,56 @@ export const TOOLS = [
 			});
 			return {
 				text: `sent ${renderMessage(message, delivery)}${args.expect_reply === true ? "\n(expects a reply)" : ""}`,
-				structured: { messageId: message.messageId, threadId: message.threadId, deliveryId: delivery.deliveryId, target: delivery.target, mode: delivery.mode }
+				structured: { messageId: message.messageId, threadId: message.threadId, deliveryId: delivery.deliveryId, target: delivery.target, mode: delivery.mode, duplicateSuppressed: false }
+			};
+		}
+	},
+	{
+		name: "wait_for_reply",
+		title: "Wait for the peer's next message on a thread",
+		description:
+			"Block until the peer posts a new message on the thread, then return it. Only messages newer than after_message_id are returned, so history is never replayed, and only messages from another actor count, so your own writes cannot end the wait. A timeout means 'not yet' and is never a reason to resend: check the delivery status and wait again on the same thread. Use this instead of ending your turn after delegating work.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				thread_id: { type: "string", description: "The thread to watch — normally the one the delegated task was sent on." },
+				after_message_id: { type: "string", description: "Only return a message newer than this one. Pass the message id you sent, so a stale reply cannot satisfy the wait." },
+				timeout_ms: { type: "number", description: "How long to wait before reporting status=timeout. Defaults to 60000; capped at 600000." }
+			},
+			required: ["thread_id"],
+			additionalProperties: false
+		},
+		async handler(args) {
+			const bridge = root();
+			const threadId = String(args.thread_id ?? "").trim();
+			if (!threadId) throw new ToolError("thread_id must not be empty");
+			const afterId = typeof args.after_message_id === "string" ? args.after_message_id.trim() : "";
+			const afterAt = afterId !== "" ? core.getMessage(bridge, afterId)?.createdAt ?? "" : "";
+			const budget = Math.min(Math.max(Number(args.timeout_ms) || 60_000, 0), 600_000);
+			const deadline = Date.now() + budget;
+			const seek = () =>
+				core
+					.listMessages(bridge)
+					.find(
+						(candidate) =>
+							candidate.threadId === threadId &&
+							candidate.from !== DEFAULT_ACTOR &&
+							(afterId === "" || (candidate.messageId !== afterId && candidate.createdAt > afterAt))
+					) ?? null;
+			let found = seek();
+			while (found === null && Date.now() < deadline) {
+				await new Promise((resolveSleep) => setTimeout(resolveSleep, 500));
+				found = seek();
+			}
+			if (found === null) {
+				return {
+					text: `status=timeout thread=${threadId} after=${afterId || "(none)"} waitedMs=${budget}\nNo reply yet. This is NOT a failure and NOT a reason to resend — the task may still be queued, claimed, or being worked on. Inspect the delivery, then wait again on the same thread.`,
+					structured: { status: "timeout", threadId, waitedMs: budget }
+				};
+			}
+			return {
+				text: `status=reply [${found.messageId}] from=${found.from} kind=${found.kind} at=${found.createdAt}\nthread=${found.threadId}${found.replyTo ? ` replyTo=${found.replyTo}` : ""}\n\n${found.body}`,
+				structured: { status: "reply", messageId: found.messageId, from: found.from, kind: found.kind, threadId: found.threadId, body: found.body }
 			};
 		}
 	},

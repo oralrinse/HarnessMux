@@ -163,8 +163,11 @@ function runHook(bridgeRoot, hookEventName, pluginRoot = ADAPTER, extraEnv = {})
 	const output = new Writable({ write(chunk, _encoding, done) { written.push(chunk.toString("utf8")); done(); } });
 	await mcp.serve({ input, output });
 	const names = JSON.parse(written.join("")).result.tools.map((tool) => tool.name);
-	assert.equal(names.length, 8, "the eight shared tools reach the client through this entry");
+	// `wait_for_reply` is the ninth: a commander that delegates work must be able to stay and wait for
+	// the executor instead of ending its turn, so it is part of the shared surface, not an extra.
+	assert.equal(names.length, 9, "the shared tools reach the client through this entry");
 	assert.ok(names.includes("bind_thread") && names.includes("get_status"), "including the routing and status tools");
+	assert.ok(names.includes("wait_for_reply"), "and the wait a commander loop depends on");
 }
 
 // --- 5. install → idempotent → uninstall (D7) -----------------------------------

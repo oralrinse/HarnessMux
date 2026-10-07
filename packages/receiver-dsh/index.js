@@ -49,7 +49,19 @@ export const inject = ["tools", "systemPrompt", "agents"];
  * than fixed — a short-lived host may be gone before its first tick, and an operator may want a
  * snappier response. Override with `watchIntervalMs` in the plugin row.
  */
-const DEFAULT_WATCH_INTERVAL_MS = 10_000;
+/**
+ * How often the watcher looks for work when a profile does not say.
+ *
+ * Lowered from 10 s to 2 s for interactive commander use: at 10 s a delegate→review round trip pays up
+ * to 10 s of pure waiting before the executor even sees the task, which is the difference between a
+ * conversation and a batch job. 2 s keeps the worst case inside a normal reply, and it is still a poll
+ * rather than a busy loop — at 2 s the tick costs one directory listing and one JSON read per pending
+ * delivery, which is nothing next to the model turn it precedes.
+ *
+ * This changes latency only. Claim exclusivity, the lease, at-least-once delivery and the ack contract
+ * are untouched: a faster poll claims the same deliveries under the same atomicity.
+ */
+const DEFAULT_WATCH_INTERVAL_MS = 2_000;
 
 /** The smallest interval accepted from config: below this the bridge would poll harder than it helps. */
 const MIN_WATCH_INTERVAL_MS = 250;
@@ -263,7 +275,7 @@ const PARAMETER_SPEC = {
 	action: {
 		type: "string",
 		required: true,
-		enum: ["read", "send", "reply", "list", "get", "status", "create", "done", "init"],
+		enum: ["read", "send", "reply", "wait", "list", "get", "status", "create", "done", "init"],
 		description: "Mailbox operation. read consumes unread messages addressed to you; send posts a new message; reply answers one message on its thread; list/get/status inspect without consuming; done consumes one message by id; init creates a missing mailbox tree."
 	},
 	body: { type: "string", description: "Message body in markdown. Required for send and reply." },
@@ -279,6 +291,18 @@ const PARAMETER_SPEC = {
 	refs: { type: "string", description: "Comma-separated files or URLs the message refers to." },
 	expect_reply: { type: "boolean", description: "Mark a sent message as waiting for an answer." },
 	from_cursor: { type: "boolean", description: "For read: only messages newer than your stored watermark." },
+	afterMessageId: {
+		type: "string",
+		description: "For wait: only return a reply newer than this message id, so a wait never re-delivers history you have already read."
+	},
+	timeoutMs: {
+		type: "number",
+		description: "For wait: how long to wait before returning status=timeout. A timeout is not a failure and must never cause a resend."
+	},
+	clientRequestId: {
+		type: "string",
+		description: "For send: your own id for this submission. Sending the same id again returns the original message instead of creating a duplicate task. Use it for anything you might retry — a pending delivery is not a failed one."
+	},
 	json: { type: "boolean", description: "Return raw JSON instead of the block rendering." }
 };
 
@@ -552,7 +576,7 @@ export function apply(ctx, config = {}) {
 		const model = typeof config.model === "string" && config.model.trim() ? config.model.trim() : "deepseek-chat";
 		return { provider, model };
 	}
-	function toolV2(action, args, exec) {
+	async function toolV2(action, args, exec) {
 		const sessionId = sessionOf(exec);
 		switch (action) {
 			case "init":
@@ -582,6 +606,49 @@ export function apply(ctx, config = {}) {
 					return value(`no v2 deliveries are addressed to this session${sessionId ? ` (${sessionId})` : ""}. The pump delivers them into a running turn automatically.`);
 				}
 				return value(entries.map((pair) => renderV2Delivery(pair.entry, pair.message)).join("\n\n"));
+			}
+			case "wait": {
+				// The missing half of a commander loop: after delegating, the caller must be able to
+				// *stay* and wait for the executor rather than ending its turn and hoping.
+				//
+				// Three properties are deliberate:
+				//   - only messages newer than `afterMessageId` are returned, so history is never replayed;
+				//   - messages from anyone but the peer are ignored, so another session answering on
+				//     another thread cannot end the wait early;
+				//   - a timeout is reported as a fact and creates nothing. A pending delivery must never be
+				//     recreated because a wait window closed — that is exactly how a task got run twice.
+				const waitThread = typeof args?.thread === "string" ? args.thread.trim() : "";
+				if (waitThread === "") return value("mailbox wait needs a thread id");
+				const afterId = typeof args?.afterMessageId === "string" ? args.afterMessageId.trim() : "";
+				const afterAt = afterId !== "" ? mailboxV2.getMessage(root, afterId)?.createdAt ?? "" : "";
+				const budget = Math.min(Math.max(Number(args?.timeoutMs) || 60_000, 0), 600_000);
+				const deadline = Date.now() + budget;
+				const seek = () => {
+					for (const candidate of mailboxV2.listMessages(root)) {
+						if (candidate.threadId !== waitThread) continue;
+						if (candidate.from === actor) continue;
+						if (afterId !== "" && (candidate.messageId === afterId || candidate.createdAt <= afterAt)) continue;
+						return candidate;
+					}
+					return null;
+				};
+				let found = seek();
+				while (found === null && Date.now() < deadline) {
+					await new Promise((resolveSleep) => setTimeout(resolveSleep, 500));
+					found = seek();
+				}
+				if (found === null) {
+					// State what a timeout does NOT mean, because the wrong inference here is what produced a
+					// duplicate task in the first place.
+					return value(
+						`status=timeout thread=${waitThread} after=${afterId || "(none)"} waitedMs=${budget}\n` +
+							"No reply yet. This is NOT a failure and NOT a reason to resend: the task may still be queued, claimed, or being worked on. Check the delivery status, then wait again on the same thread."
+					);
+				}
+				return value(
+					`status=reply [${found.messageId}] from=${found.from} kind=${found.kind} at=${found.createdAt}\n` +
+						`thread=${found.threadId}${found.replyTo ? ` replyTo=${found.replyTo}` : ""}\n\n${found.body}`
+				);
 			}
 			case "get": {
 				if (!args?.id) return value("mailbox get needs id (a messageId)");
@@ -629,11 +696,35 @@ export function apply(ctx, config = {}) {
 			case "send": {
 				const body = typeof args?.body === "string" ? args.body.trim() : "";
 				if (!body) return value("mailbox send needs a non-empty body");
+				// Second line of defence against a duplicate task, after the client's own discipline.
+				//
+				// A pending delivery is not a failed one. A commander that sends, waits, concludes it was
+				// not picked up and sends again makes the executor do the work twice — observed in
+				// practice. Given a client-supplied request id, the repeat returns the original message and
+				// its existing delivery instead of creating a second logical task, and says so, so the
+				// caller can tell suppression apart from a fresh send.
+				const requestId = typeof args?.clientRequestId === "string" ? args.clientRequestId.trim() : "";
+				if (requestId !== "") {
+					const existing = mailboxV2.findMessageByRequestId(root, { from: actor, clientRequestId: requestId });
+					if (existing !== null) {
+						const inFlight = mailboxV2
+							.listDeliveries(root, "queued")
+							.concat(mailboxV2.listDeliveries(root, "claimed"))
+							.find((row) => row.messageId === existing.messageId);
+						return value(
+							`duplicateSuppressed=true\nexisting [${existing.messageId}] thread=${existing.threadId}\n` +
+								(inFlight ? `delivery=${inFlight.deliveryId} (still in flight)\n` : "") +
+								"Nothing new was created. Do NOT resend: a pending delivery is not a failed one. " +
+								"Track this message and delivery, or call wait on this thread."
+						);
+					}
+				}
 				const message = mailboxV2.postMessage(root, {
 					from: actor,
 					topic: typeof args?.topic === "string" && args.topic.trim() ? args.topic.trim() : `from ${actor} (${sessionId ?? "session"})`,
 					kind: typeof args?.kind === "string" ? args.kind : "note",
 					refs: typeof args?.refs === "string" ? args.refs.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+					clientRequestId: requestId || undefined,
 					body
 				});
 				// An unbound thread stays unrouted on purpose: never guess a session.
