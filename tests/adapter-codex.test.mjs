@@ -226,12 +226,15 @@ function runHook(bridgeRoot, extraEnv = {}) {
 	const run = (...args) => execFileSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env });
 
 	try {
-		// Exactly what `codex plugin add` leaves behind: a copy of the plugin, manifest and launcher
-		// included — the installer refuses to rewrite a cache whose launcher is missing, because a
-		// silent fallback would reinstate the relative-argument bug.
+		// Exactly what `codex plugin add` leaves behind: a copy of the plugin, manifest and both
+		// launchers included — the installer refuses to rewrite a cache whose launcher is missing,
+		// because a silent fallback would reinstate the relative-argument bug. The Windows shim has
+		// to be present, otherwise this test silently exercises the non-Windows branch and proves
+		// nothing about the path the desktop actually takes.
 		mkdirSync(join(cacheDir, "scripts"), { recursive: true });
 		writeFileSync(cachedFile, `${JSON.stringify(template, null, 2)}\n`, "utf8");
 		copyFileSync(join(ADAPTER, "scripts", "launch-mcp.mjs"), join(cacheDir, "scripts", "launch-mcp.mjs"));
+		for (const shim of ["node-shim.cmd", "pending-shim.cmd"]) copyFileSync(join(ADAPTER, "scripts", shim), join(cacheDir, "scripts", shim));
 		assert.equal(readJson(cachedFile).mcpServers.harnessmux.command, "node", "the cache starts with the unstartable command");
 
 		const output = run("--codex");
@@ -240,22 +243,91 @@ function runHook(bridgeRoot, extraEnv = {}) {
 		assert.notEqual(repairedServer.command, "node", "the installed copy no longer relies on PATH");
 		assert.equal(isAbsolute(repairedServer.command), true, `the command is an absolute path (got ${JSON.stringify(repairedServer.command)})`);
 		assert.equal(existsSync(repairedServer.command), true, "and that path exists on this machine");
-
-		// The launcher argument must be absolute too. It used to be `./scripts/launch-mcp.mjs`,
-		// which the host resolves against its own working directory rather than the plugin root:
-		// reproduced as `Cannot find module 'C:\Users\…\scripts\launch-mcp.mjs'`, the desktop's
-		// "os error 2". A relative argument here is therefore a defect even when the command is
-		// absolute.
-		assert.equal(repairedServer.args.length, 1, "one launcher argument");
-		assert.equal(isAbsolute(repairedServer.args[0]), true, `the launcher is addressed absolutely (got ${JSON.stringify(repairedServer.args[0])})`);
-		assert.equal(existsSync(repairedServer.args[0]), true, "and that launcher exists");
 		assert.equal(repairedServer.cwd, undefined, "no relative cwd is left for the host to resolve");
+
+		if (process.platform === "win32") {
+			// The stable anchor: an interpreter that is permanent and findable by name, plus a shim
+			// that resolves node at spawn time. An absolute node path would work only until Codex
+			// replaces the versioned runtime directory it points into, which is how this broke twice.
+			assert.match(repairedServer.command, /cmd\.exe$/iu, "node is reached through the permanent Windows shell, not an absolute node");
+			assert.deepEqual(repairedServer.args.slice(0, 3), ["/d", "/s", "/c"], "invoked in a form the host can pass through");
+			assert.equal(isAbsolute(repairedServer.args[3]), true, "the shim itself is addressed absolutely");
+			assert.match(repairedServer.args[3], /node-shim\.cmd$/u, "and it is the shim, not a bare script");
+			assert.equal(existsSync(repairedServer.args[3]), true, "and it exists");
+			assert.equal(repairedServer.args[4], "launch-mcp.mjs", "the shim is told which script to run");
+
+			// The parsed command must not name node: that is the whole point of the shim.
+			assert.equal(JSON.stringify(repairedServer).includes("node.exe"), false, "no version-sensitive node path is written into the host config");
+		} else {
+			assert.equal(isAbsolute(repairedServer.args[0]), true, "on POSIX the launcher is addressed absolutely");
+			assert.equal(existsSync(repairedServer.args[0]), true, "and that launcher exists");
+		}
 
 		// Idempotent, and it never rewrites the tracked template.
 		assert.match(run("--codex"), /already correct/u, "a second install finds nothing to change");
 		const templateServer = readJson(join(ADAPTER, ".mcp.json")).mcpServers.harnessmux;
 		assert.equal(templateServer.command, "node", "the repository template is still portable");
 		assert.equal(templateServer.args[0], "./scripts/launch-mcp.mjs", "and keeps its plugin-relative launcher");
+	} finally {
+		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 7. the Windows shims must be pure ASCII -----------------------------------
+// cmd.exe parses a `.cmd` file in the console's OEM code page, not as UTF-8. A non-ASCII byte in
+// one therefore splits into several characters, each of which cmd tries to run as a command. An
+// em dash was enough to produce 31 lines of `'m' is not recognized as an internal or external
+// command` on a Chinese-locale Windows while the script itself still worked — a hook that both
+// succeeds and floods the client with errors. Pure ASCII is the only encoding that behaves.
+{
+	for (const shim of ["node-shim.cmd", "pending-shim.cmd"]) {
+		const bytes = readFileSync(join(ADAPTER, "scripts", shim));
+		const offenders = [...bytes].map((byte, index) => ({ byte, index })).filter((entry) => entry.byte > 127);
+		assert.equal(
+			offenders.length,
+			0,
+			`${shim} must contain only ASCII (first offending byte ${offenders[0]?.byte} at offset ${offenders[0]?.index})`
+		);
+		// It also has to reach node without being told where node is.
+		const text = bytes.toString("ascii");
+		assert.match(text, /HARNESSMUX_NODE/u, `${shim} honours the explicit override`);
+		assert.match(text, /where node\.exe/u, `${shim} falls back to PATH`);
+		assert.match(text, /runtimes\\cua_node/u, `${shim} falls back to the runtime Codex ships`);
+	}
+}
+
+// --- 8. an upgraded hook replaces the old entry instead of duplicating it --------
+// `isOurHook` originally matched only the `pending.mjs` form. Introducing the shim form without
+// widening it left the previous entry in place, so the same listing was delivered twice per turn.
+{
+	const codexHome = mkdtempSync(join(tmpdir(), "hxmux-codex-hooks-"));
+	const hooksPath = join(codexHome, "hooks.json");
+	const env = { ...process.env, CODEX_HOME: codexHome };
+	const run = (...args) => execFileSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env });
+	const stale = 'node "H:\\\\somewhere\\\\harnessmux\\\\packages\\\\adapter-codex\\\\scripts\\\\pending.mjs" --actor codex';
+	const foreign = { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo someone-else", timeoutSec: 5 }] }] } };
+
+	try {
+		writeFileSync(hooksPath, `${JSON.stringify(foreign, null, 2)}\n`, "utf8");
+		// A previous installation, in the shape this adapter used to write.
+		const doc = readJson(hooksPath);
+		doc.hooks.SessionStart.push({ hooks: [{ type: "command", command: stale, timeoutSec: 20 }] });
+		doc.hooks.UserPromptSubmit = [{ hooks: [{ type: "command", command: stale, timeoutSec: 20 }] }];
+		writeFileSync(hooksPath, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+
+		const output = run("--codex");
+		assert.match(output, /replaced 2 stale entry/u, "both stale entries are recognised and replaced");
+
+		const after = readJson(hooksPath);
+		const ours = (event) => (after.hooks[event] ?? []).flatMap((group) => group.hooks ?? []).filter((hook) => String(hook.command).includes("--actor codex"));
+		assert.equal(ours("SessionStart").length, 1, "exactly one SessionStart hook of ours remains");
+		assert.equal(ours("UserPromptSubmit").length, 1, "exactly one UserPromptSubmit hook remains");
+		assert.equal(JSON.stringify(after).includes("pending.mjs"), false, "the superseded command is gone");
+		assert.equal(
+			after.hooks.SessionStart.some((group) => (group.hooks ?? []).some((hook) => hook.command === "echo someone-else")),
+			true,
+			"a foreign hook is preserved untouched"
+		);
 	} finally {
 		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}

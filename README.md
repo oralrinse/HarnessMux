@@ -184,14 +184,33 @@ Two things worth knowing, both found by running it rather than by reading about 
   interpreter and the launcher are absolute. The launcher matters as much as node: as
   `./scripts/launch-mcp.mjs` with `"cwd": "."`, the host resolved both against *its own* working
   directory, which reproduces as `Cannot find module '…\scripts\launch-mcp.mjs'` — the same
-  `os error 2`. The `cwd` field is dropped for that reason; the launcher finds the shared server
-  relative to its own file.
+  `os error 2`. The `cwd` field is dropped for that reason.
+
+  **On Windows the entry goes through `cmd.exe` and a shim instead of naming node at all.** An
+  absolute node path is only correct until that node disappears, and the obvious candidate —
+  Codex's own runtime — lives in a *versioned* directory (`runtimes\cua_node\<hash>\bin\node.exe`)
+  that an update replaces; that broke this plugin twice, taking the MCP server and the hooks down
+  together. So the config names `…\System32\cmd.exe` (permanent, findable by name) and
+  `scripts/node-shim.cmd`, which resolves node at spawn time: `HARNESSMUX_NODE` → a `node.exe`
+  beside the shim → `node` on PATH (nvm/fnm/volta) → every Codex runtime, newest first. The hooks
+  use `scripts/pending-shim.cmd` the same way. On other platforms the launcher is used directly
+  with the resolved node.
+
+  Two rules follow from that, both enforced by tests:
+
+  - **The `.cmd` files must stay pure ASCII.** cmd.exe parses a `.cmd` in the console's OEM code
+    page, not as UTF-8, so one non-ASCII byte splits into several characters that cmd then tries to
+    run as commands. A single em dash produced 31 lines of `'m' is not recognized …` on a
+    Chinese-locale Windows while the hook itself still worked.
+  - **An upgrade replaces our hooks rather than adding to them.** The ownership test recognises
+    both the old `pending.mjs` form and the shim form, so re-running the installer leaves exactly
+    one hook per event and never touches anyone else's entries.
 
   Node is chosen in this order: `HARNESSMUX_NODE` (or `CODEX_MCP_NODE_PATH`) → a system
-  installation → whatever `node` resolves to on your PATH, which covers nvm/fnm/volta layouts →
-  the runtime Codex itself ships → the interpreter that ran the installer. **If none of those is
-  right for your machine, set `HARNESSMUX_NODE` and re-run.** The repository keeps the portable
-  template, because absolute paths there would publish one machine's layout.
+  installation → whatever `node` resolves to on your PATH → the runtime Codex itself ships → the
+  interpreter that ran the installer. **If none of those is right for your machine, set
+  `HARNESSMUX_NODE` and re-run.** The repository keeps the portable template, because absolute
+  paths there would publish one machine's layout.
 
   Two consequences worth knowing:
 

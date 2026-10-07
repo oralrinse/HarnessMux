@@ -175,25 +175,48 @@ function codexPaths() {
 /**
  * The hook entries this adapter owns inside `~/.codex/hooks.json`.
  *
- * The command must be an **absolute** path. Codex resolves a hook command against the
- * directory holding the hooks file (`~/.codex`), not against the plugin or the project,
- * so the relative form `node ./scripts/pending.mjs` that the plugin's own `hooks.json`
- * uses fails there with `Cannot find module` — observed as `hook: SessionStart Failed`.
- * The plugin's copy stays relative (that file lives next to the script); the installed
- * one is absolute because it does not.
+ * The command must be **absolute**. Codex resolves a hook command against the directory holding
+ * the hooks file (`~/.codex`), not against the plugin or the project, so the relative form
+ * `node ./scripts/pending.mjs` fails there with `Cannot find module` — observed as
+ * `hook: SessionStart Failed`.
+ *
+ * It also must not name node by an absolute path, for the same reason the MCP entry does not:
+ * Codex's runtime lives in a versioned directory that an update replaces, which silently breaks
+ * the command. The hooks therefore go through the same `cmd.exe` + `.cmd` shim as the server, so
+ * node is resolved at run time.
  *
  * Kept as data so install and uninstall cannot drift apart.
  */
 function codexHooks() {
-	const script = join(REPO_ROOT, "packages", "adapter-codex", "scripts", "pending.mjs");
-	const command = `node "${script}" --actor codex`;
+	const shim = join(REPO_ROOT, "packages", "adapter-codex", "scripts", "node-shim.cmd");
+	const pending = join(REPO_ROOT, "packages", "adapter-codex", "scripts", "pending.mjs");
+	// Windows: the shim resolves node; elsewhere the interpreter running the installer is used,
+	// which is the same choice `resolveNodeForMcp` falls back to.
+	const command = process.platform === "win32"
+		? `"${join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")}" /d /s /c "${join(dirname(shim), "pending-shim.cmd")}" --actor codex`
+		: `"${process.execPath}" "${pending}" --actor codex`;
 	return { SessionStart: command, UserPromptSubmit: command };
 }
 
-/** Whether a hook entry was written by this adapter. */
+/**
+ * Whether a hook entry was written by this adapter.
+ *
+ * Recognises both shapes this adapter has ever written, so an install after an upgrade
+ * **replaces** the old entry instead of adding a second one beside it:
+ *   - `node "<…>/pending.mjs" --actor codex`                      the original form
+ *   - `"…/cmd.exe" /d /s /c "<…>/pending-shim.cmd" --actor codex` the PATH-independent form
+ * Matching only the first is what produced duplicate hooks when the second was introduced, and
+ * duplicates mean the same listing is delivered to the model twice per turn.
+ *
+ * @param {object} hook - one hook entry from `hooks.json`.
+ * @returns {boolean} true when this adapter owns it.
+ */
 function isOurHook(hook) {
 	if (typeof hook?.command !== "string") return false;
-	return hook.command.includes("harnessmux") && hook.command.includes("pending.mjs") && hook.command.includes("--actor codex");
+	const script = hook.command.includes("pending.mjs") || hook.command.includes("pending-shim.cmd");
+	// The actor flag is part of the identity: it keeps this entry distinguishable from any other
+	// tool's hook that happens to run a similarly named script.
+	return script && hook.command.includes("--actor codex");
 }
 
 /**
@@ -350,13 +373,26 @@ function refreshCachedMcpConfigs(node) {
 			process.stderr.write(`harnessmux: ${launcher} is missing, so the MCP server cannot be started from the cache. Re-run \`codex plugin add harnessmux@harnessmux\` first, then this installer.\n`);
 			continue;
 		}
-		const wantedArgs = [launcher];
+		// Windows is addressed through `cmd.exe` plus a `.cmd` shim, not through an absolute node.
+		//
+		// Two host facts force this, and both were measured rather than assumed:
+		//   1. the desktop app does not put node on the PATH of what it spawns, so `"command": "node"`
+		//      fails with `MCP startup failed: No such file or directory (os error 2)`;
+		//   2. an absolute node path works only until that node goes away, and Codex's own runtime
+		//      lives in a *versioned* directory (`runtimes\cua_node\<hash>\bin\node.exe`) that is
+		//      replaced on update. That is exactly how this broke the second time.
+		// `cmd.exe` is the one executable that is both findable by name and permanent, and the shim
+		// resolves node at spawn time, so an update cannot invalidate the entry.
+		const shim = join(dirname(file), "scripts", "node-shim.cmd");
+		const shimExists = existsSync(shim);
+		const wantedCommand = process.platform === "win32" && shimExists ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe") : node;
+		const wantedArgs = process.platform === "win32" && shimExists ? ["/d", "/s", "/c", shim, "launch-mcp.mjs"] : [launcher];
 		const sameArgs = JSON.stringify(server.args) === JSON.stringify(wantedArgs);
-		// `cwd: "."` is dropped: the host resolved it against its own directory anyway, and the
-		// launcher needs nothing from the working directory once it is addressed absolutely.
+		// `cwd: "."` is dropped: the host resolved it against its own directory anyway, and both
+		// launchers need nothing from the working directory.
 		const dropCwd = server.cwd !== undefined;
-		if (server.command === node && sameArgs && !dropCwd) continue;
-		server.command = node;
+		if (server.command === wantedCommand && sameArgs && !dropCwd) continue;
+		server.command = wantedCommand;
 		server.args = wantedArgs;
 		delete server.cwd;
 		if (!dryRun) {
@@ -478,6 +514,11 @@ async function installCodexAdapter() {	const paths = codexPaths();
 	}
 
 	// 4. the lifecycle hooks, merged rather than overwritten.
+	//
+	// Merge means: our own entries are removed first (in any shape this adapter has ever written)
+	// and then re-added in the current shape; everything that is not ours is left exactly as it
+	// was. Without the removal step an upgrade that changes the command string leaves the old
+	// entry in place beside the new one, and the model receives the same listing twice per turn.
 	let hooksDoc = { hooks: {} };
 	if (existsSync(paths.hooks)) {
 		try {
@@ -488,19 +529,36 @@ async function installCodexAdapter() {	const paths = codexPaths();
 			process.exit(1);
 		}
 	}
+	const wanted = codexHooks();
 	let hooksChanged = 0;
-	for (const [event, command] of Object.entries(codexHooks())) {
+	let hooksReplaced = 0;
+	for (const event of new Set([...Object.keys(hooksDoc.hooks), ...Object.keys(wanted)])) {
+		const groups = Array.isArray(hooksDoc.hooks[event]) ? hooksDoc.hooks[event] : [];
+		const kept = [];
+		for (const group of groups) {
+			const remaining = (group?.hooks ?? []).filter((hook) => !isOurHook(hook));
+			if (remaining.length !== (group?.hooks ?? []).length) {
+				hooksChanged += 1;
+				hooksReplaced += 1;
+			}
+			if (remaining.length > 0) kept.push({ ...group, hooks: remaining });
+		}
+		hooksDoc.hooks[event] = kept;
+	}
+	for (const [event, command] of Object.entries(wanted)) {
 		hooksDoc.hooks[event] ??= [];
-		const present = hooksDoc.hooks[event].some((group) => (group.hooks ?? []).some((hook) => hook?.command === command));
-		if (present) continue;
-		hooksChanged += 1;
 		hooksDoc.hooks[event].push({ hooks: [{ type: "command", command, timeoutSec: 20 }] });
+		hooksChanged += 1;
+	}
+	// Drop an event key we emptied rather than leaving an empty array behind.
+	for (const [event, groups] of Object.entries(hooksDoc.hooks)) {
+		if (Array.isArray(groups) && groups.length === 0) delete hooksDoc.hooks[event];
 	}
 	if (hooksChanged > 0 && !dryRun) {
 		if (existsSync(paths.hooks)) backup(paths.hooks);
 		writeFileSync(paths.hooks, `${JSON.stringify(hooksDoc, null, 2)}\n`, "utf8");
 	}
-	process.stdout.write(`${dryRun ? "[dry-run] " : ""}${hooksChanged > 0 ? `added ${hooksChanged} hook(s)` : "hooks already installed"}: ${paths.hooks}\n`);
+	process.stdout.write(`${dryRun ? "[dry-run] " : ""}hooks ${hooksReplaced > 0 ? `replaced ${hooksReplaced} stale entry(ies)` : "installed"}: ${paths.hooks}\n`);
 
 	process.stdout.write([
 		"",

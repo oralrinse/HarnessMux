@@ -95,6 +95,32 @@ Mode B is what worker orchestrators do well; it is worth having for disposable,
 parallel workers. It is **not** the project's differentiator, and P3 does not wait
 for it.
 
+### P4.5 — Visible Executor Mode *(recon complete, implementation not started)*
+
+The gap this closes: a delegated task today waits for a human to give DSH a turn.
+
+```text
+Codex → HarnessMux → DSH idle → delivery queued → (a person must touch DSH)
+```
+
+Target: `Codex → HarnessMux → a HarnessMux-owned DSH session that starts its own turn → the user
+watches it work in the Harness UI → the result returns to the originating client`.
+
+Reconnaissance is in [REPORT-visible-executor-recon.md](REPORT-visible-executor-recon.md). The
+headline result: the host **does** support this. `ctx.agents.create`/`resume` plus `followup()`
+start a real turn on a real, persisted, UI-visible session without user interaction, and the turn
+lifecycle is observable through host events.
+
+Still open before implementation may start:
+
+| # | Unknown | Why it blocks |
+| --- | --- | --- |
+| 1 | the in-process accessor for the final assistant text (`readSurface()` returned no events) | the automatic return of a result depends on it |
+| 2 | what happens if the user opens the Executor session while a delegated turn runs (writer lock) | it is the one interaction that could surprise a user |
+
+Blocked in practice by an adapter defect recorded below: the Codex MCP server and hooks name node by
+an absolute path inside Codex's **versioned** runtime directory, which is replaced on update.
+
 ### P6 — Generic Receiver API
 
 ```text
