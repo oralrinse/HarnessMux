@@ -75,6 +75,35 @@ What that means in practice:
   its next lifecycle event. Codex cannot be woken while it is idle — that is a host boundary, not a
   promise this project breaks.
 
+### Check that it is actually live
+
+A mounted plugin is not hot-reloaded, so **restart DeepSeek Harness after installing or updating
+it**. Whether the running process has the wake capability is readable from its own trace — an older
+receiver and a current one are otherwise indistinguishable:
+
+```sh
+grep 'apply: root=' <bridge>/plugin-debug.log | tail -1
+# apply: root=… endpointId=dsh-endpoint protocol=v2 autoWake=true \
+#   currentSessionControl=true watchMs=10000 agentsInjected=true
+```
+
+`currentSessionControl=true` is the flag that decides whether an idle bound session can be woken.
+If the line is missing it, the process predates the feature: restart.
+
+After a delegated task, the same trace says what happened, and the difference between a delivered
+instruction and a woken one is one word:
+
+```sh
+grep -E 'pump: (claimed|woke|skip)' <bridge>/plugin-debug.log | tail -5
+```
+
+- `pump: claimed <id> attempt=1` then `pump: woke <session> for <id> attempt=1` — the session was
+  woken and the delivery is acked with `note=woken`;
+- `no wake for <id> (mode=advisory, delegatedBinding=false)` — it was declined on purpose, and the
+  trace names which condition was missing;
+- `skip <id> session A != B` — the delivery belongs to a different session than the one being
+  considered, which is the isolation working.
+
 ### How this differs from worker orchestrators
 
 External orchestrators dispatch a task and launch or manage a **worker** to run it.
