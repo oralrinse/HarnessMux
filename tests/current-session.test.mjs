@@ -409,7 +409,46 @@ function seedDelivery(root, input) {
 	}
 }
 
-// --- 9. the plugin file itself stays tied to the documented contract -------------
+// --- 9. a session never claims work that belongs to another one ----------------
+// Locked in after seeing a delegated instruction reach `attempt 33` on the real bridge: a second live
+// session appeared to claim it, find it was not the target, release it, and claim it again on the next
+// tick, so the history read like 33 failed deliveries when nothing had failed — the right session had
+// simply lost the race. The delivery was never lost; `attempt` stopped being a signal.
+//
+// What this asserts is the invariant, not the mechanism. A guard added alongside this test was removed
+// again because disabling that guard did not make the test fail, which means the test was not
+// exercising it — the existing session check already provides the behaviour. This still fails if
+// anyone reorders the checks so that claiming happens first.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-ownership-"));
+	core.ensureBridge(root, { remember: false });
+	const target = "session-owned-by-other";
+	const bystander = "session-bystander";
+	core.registerEndpoint(root, { actor: "dsh", endpointId: "dsh-endpoint", transport: "in-process", sessions: [target, bystander], remember: false });
+	try {
+		const message = core.postMessage(root, { from: "codex", topic: "ownership", kind: "instruction", body: "for the other session" });
+		core.bindThread(root, { threadId: message.threadId, endpointId: "dsh-endpoint", sessionId: target, mode: "delegated" });
+		const delivery = core.enqueueDelivery(root, { messageId: message.messageId, actor: "dsh", endpointId: "dsh-endpoint", sessionId: target, mode: "delegated" });
+
+		// A *running* agent for a different session: able to steer, but not the addressee.
+		const steered = [];
+		const agent = { status: "running", steer: (entry) => steered.push(entry), session: { header: { id: bystander } } };
+		const mock = mockContext(agent);
+		plugin.apply(mock.ctx, { bridgeRoot: root, protocolVersion: "v2", endpointId: "dsh-endpoint", watchIntervalMs: 400, debugLog: join(root, "trace.log") });
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 3_000));
+			assert.equal(steered.length, 0, "the bystander session does not hand the delivery over");
+			assert.equal(core.getDelivery(root, delivery.deliveryId).state, "queued", "the delivery is left for its own session");
+			assert.equal(core.getDelivery(root, delivery.deliveryId).attempt, 0, "and its attempt count is not inflated by the race");
+		} finally {
+			mock.dispose();
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 10. the plugin file itself stays tied to the documented contract -----------
 {
 	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
 	assert.match(source, /resumeSessionId/u, "the wake path uses resume's own option name");
