@@ -75,6 +75,13 @@ function runHook(bridgeRoot, hookEventName, pluginRoot = ADAPTER, extraEnv = {})
 	// The validator is Claude Code's own; treat its verdict as part of the contract.
 	const validated = execFileSync("claude", ["plugin", "validate", ADAPTER], { encoding: "utf8" });
 	assert.match(validated, /Validation passed/u, "claude plugin validate accepts the adapter");
+
+	// Cursor reads MCP from the manifest rather than discovering a nearby `.mcp.json`, so this
+	// field is what makes the same plugin work there; Claude ignores it. Dropping it would
+	// silently break Cursor only, which is why it is pinned instead of left implicit.
+	assert.equal(manifest.mcpServers, "./.mcp.json", "the manifest declares its MCP file by path (Cursor requires it, Claude ignores it)");
+	assert.equal(existsSync(join(ADAPTER, ".mcp.json")), true, "and the declared file exists beside the manifest");
+	assert.equal(manifest.skills?.[0], "./skills/", "the skill path stays declared for both loaders");
 }
 
 // --- 2. the MCP declaration ----------------------------------------------------

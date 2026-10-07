@@ -197,8 +197,19 @@ session, and a message waiting for Claude was quoted back by the model on its ne
 Worth knowing: Claude needs **no trust step** for plugin hooks (Codex does), and it resolves
 its own plugin directory, so the adapter carries no pointer file for that purpose.
 
-**Cursor, VS Code / Copilot** — planned adapters (P3.4). They reuse the same MCP tools, so the
-work is a manifest plus a thin adapter, not another client implementation.
+**Cursor** — its plugin loader was read on Cursor 2.5.25, and it accepts
+`.claude-plugin/plugin.json` (a root `plugin.json` is **not** one of its manifest paths), reads
+MCP from `.mcp.json`/`mcp.json` keyed by `mcpServers`, and expands `${CLAUDE_PLUGIN_ROOT}` as
+well as `${CURSOR_PLUGIN_ROOT}`. Two consequences: the Claude-shaped adapter is already one of
+the layouts Cursor accepts, and Cursor requires MCP to be **declared** —
+`"mcpServers": "./.mcp.json"`, which the adapter manifest now does (Claude ignores the field).
+Loading a plugin runs through `~/.claude/plugins/installed_plugins.json`, which does not exist
+when the adapter is installed by linking into `~/.claude/skills/`. Details, including what is
+*not* yet verified, are in [docs/REPORT-p3.4a-cursor-recon.md](docs/REPORT-p3.4a-cursor-recon.md).
+
+**VS Code / GitHub Copilot** — planned, and **the client is not installed on the machine this
+was developed against** (`code --list-extensions` has no `github.copilot*`), so nothing about
+Copilot is claimed. See [docs/REPORT-p3.4b-copilot-recon.md](docs/REPORT-p3.4b-copilot-recon.md).
 
 **Anything else** — the CLI is a first-class surface, not a fallback: it is the
 debugging path, the CI path, and the integration path for languages and clients this
