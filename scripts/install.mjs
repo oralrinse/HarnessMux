@@ -190,10 +190,21 @@ function codexPaths() {
 function codexHooks() {
 	const shim = join(REPO_ROOT, "packages", "adapter-codex", "scripts", "node-shim.cmd");
 	const pending = join(REPO_ROOT, "packages", "adapter-codex", "scripts", "pending.mjs");
-	// Windows: the shim resolves node; elsewhere the interpreter running the installer is used,
-	// which is the same choice `resolveNodeForMcp` falls back to.
+	// `cmd.exe` is deliberately **not** quoted and **not** given as a full path.
+	//
+	// A hook is not necessarily executed by Windows: Codex honours `integratedTerminalShell`, and
+	// when that is `wsl` the command runs through a POSIX shell, where a quoted
+	// `"C:\WINDOWS\System32\cmd.exe"` is looked up as a program whose *name includes the quotes* and
+	// the hook dies with `exited with code 127`. Measured from WSL, three forms and what they do:
+	//
+	//   "C:\WINDOWS\System32\cmd.exe" …   -> not found, 127      (what this used to write)
+	//   cmd.exe …                         -> runs               (chosen)
+	//   /mnt/c/Windows/System32/cmd.exe … -> runs
+	//
+	// Bare `cmd.exe` is the only form that works in both: Windows resolves it through PATH, and WSL
+	// resolves it through interop, which puts the Windows system directories on PATH.
 	const command = process.platform === "win32"
-		? `"${join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")}" /d /s /c "${join(dirname(shim), "pending-shim.cmd")}" --actor codex`
+		? `cmd.exe /d /s /c "${join(dirname(shim), "pending-shim.cmd")}" --actor codex`
 		: `"${process.execPath}" "${pending}" --actor codex`;
 	return { SessionStart: command, UserPromptSubmit: command };
 }

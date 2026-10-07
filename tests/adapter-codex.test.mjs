@@ -336,6 +336,26 @@ function runHook(bridgeRoot, extraEnv = {}) {
 		const second = run("--codex");
 		assert.equal(/replaced/u.test(second), false, "a settled install reports no replacements");
 		assert.equal(readFileSync(hooksPath, "utf8"), textBefore, "and rewrites nothing");
+
+		// The hook command must survive being run by a POSIX shell, because Codex honours
+		// `integratedTerminalShell` and may execute hooks through WSL. There, a quoted Windows path is
+		// looked up as a program whose *name contains the quotes*, and the hook dies with
+		// `exited with code 127`. Bare `cmd.exe` is the only form that works in both worlds: Windows
+		// resolves it through PATH and WSL resolves it through interop. Measured from WSL:
+		//   "C:\WINDOWS\System32\cmd.exe" …  -> not found        cmd.exe …  -> runs
+		if (process.platform === "win32") {
+			const installed = (readJson(hooksPath).hooks.SessionStart ?? [])
+				.flatMap((group) => group.hooks ?? [])
+				.find((hook) => String(hook.command).includes("--actor codex"));
+			assert.notEqual(installed, undefined, "our hook is installed");
+			assert.equal(/^"/u.test(installed.command), false, "the command does not begin with a quoted path");
+			// Only the shell invocation is constrained; the script it runs is deliberately absolute and
+			// therefore does contain a drive-letter path.
+			const shellPart = installed.command.split("/d /s /c")[0];
+			assert.equal(shellPart.includes(":\\"), false, "the shell itself is not named by a Windows path");
+			assert.match(installed.command, /^cmd\.exe \/d \/s \/c /u, "it invokes cmd.exe by name so Windows and WSL both find it");
+			assert.match(installed.command, /pending-shim\.cmd"/u, "while the script it runs is still absolute");
+		}
 	} finally {
 		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}
