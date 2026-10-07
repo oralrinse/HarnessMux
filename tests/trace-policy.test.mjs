@@ -96,13 +96,19 @@ assert.equal(linesMatching("apply: root=").length, 1, "mounting records exactly 
 // --- 1. idle ticks must not multiply lines --------------------------------------
 await waitUntil("the first idle observation", () => linesMatching("status=idle").length >= 1);
 assert.equal(linesMatching("status=idle").length, 1, "the first idle tick is recorded");
-assert.equal(linesMatching("pump: sessionId=").length, 0, "an idle agent is not pumped at all");
+// Since Current Session Control the watcher also considers idle sessions — that is what makes them
+// wakeable — so one queue-shape summary per idle session is expected. What must not happen is that
+// it grows with the clock. This is the assertion that keeps the trace change-driven.
+const summaryAtFirst = linesMatching("pump: sessionId=session-trace").length;
+assert.ok(summaryAtFirst <= 1, `at most one queue-shape summary per idle session (got ${summaryAtFirst})`);
 
 // Wait out at least two more ticks. The agent stays idle throughout, so the state is
 // genuinely steady — the previous trace kind would add one line per tick.
 await new Promise((resolve) => setTimeout(resolve, TICK_MS * 2 + 2_000));
 const afterTicks = linesMatching("status=idle").length;
 assert.equal(afterTicks, 1, `three idle ticks must still be one line (got ${afterTicks})`);
+const summaryAfter = linesMatching("pump: sessionId=session-trace").length;
+assert.equal(summaryAfter, summaryAtFirst, `three idle ticks must not add queue-shape lines (was ${summaryAtFirst}, now ${summaryAfter})`);
 
 // --- 2. a real transition is still recorded, and the queue is inspected ---------
 idleAgent.status = "running";

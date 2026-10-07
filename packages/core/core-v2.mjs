@@ -619,6 +619,76 @@ export function ackDelivery(root, deliveryId, input = {}) {
 }
 
 /**
+ * Correlate one delivery with the host-side work it caused.
+ *
+ * This answers the question the automatic return path depends on: *which* host turn did this
+ * HarnessMux delivery start? The record is deliberately **descriptive, not authoritative** — it
+ * lives beside `queue/claims/acks` and never participates in routing, claiming or acking. Losing
+ * one costs traceability for that delivery, never a delivery.
+ *
+ * Written after the host accepted the hand-off and before the ack, so a crash in between leaves an
+ * ack missing (which the lease recovers) rather than a correlation claiming work that never began.
+ *
+ * @param {string} root - bridge root.
+ * @param {object} input - the correlation:
+ *   `deliveryId`, `messageId`, `threadId`, `originActor`, `originMessageId`, `endpointId`,
+ *   `sessionId`, `bindingMode`, `deliveryMode`, `disposition`, and optional `turnId`/`turn` when
+ *   the host exposes one.
+ * @returns {{path: string, record: object, turnId: string|null}} where it was written.
+ */
+export function recordDispatch(root, input = {}) {
+	ensureBridge(root, { remember: false });
+	const deliveryId = requireName(input.deliveryId, "deliveryId");
+	const turnId = typeof input.turnId === "string" && input.turnId.trim() !== "" ? input.turnId.trim() : null;
+	const record = {
+		deliveryId,
+		messageId: typeof input.messageId === "string" ? input.messageId : null,
+		threadId: typeof input.threadId === "string" ? input.threadId : null,
+		originActor: typeof input.originActor === "string" ? input.originActor : null,
+		originMessageId: typeof input.originMessageId === "string" ? input.originMessageId : null,
+		endpointId: typeof input.endpointId === "string" ? input.endpointId : null,
+		sessionId: typeof input.sessionId === "string" ? input.sessionId : null,
+		bindingMode: typeof input.bindingMode === "string" ? input.bindingMode : null,
+		deliveryMode: typeof input.deliveryMode === "string" ? input.deliveryMode : null,
+		disposition: typeof input.disposition === "string" ? input.disposition : null,
+		// `null` is meaningful: the host did not expose a turn identity at hand-off time. Recording
+		// the absence is how a later reader knows the difference between "not captured" and "none".
+		turnId,
+		...(Number.isInteger(input.turn) ? { turn: input.turn } : {}),
+		recordedAt: new Date().toISOString()
+	};
+	const dir = join(root, "dispatches");
+	mkdirSync(dir, { recursive: true });
+	const path = join(dir, `${deliveryId}.json`);
+	writeJson(path, record);
+	audit(root, { event: "delivery.dispatched", deliveryId, sessionId: record.sessionId, disposition: record.disposition });
+	return { path, record, turnId };
+}
+
+/** The correlation record for one delivery, or null when none was written. */
+export function getDispatch(root, deliveryId) {
+	const path = join(root, "dispatches", `${requireName(deliveryId, "deliveryId")}.json`);
+	return existsSync(path) ? readJson(path) : null;
+}
+
+/** Every correlation record, newest first. */
+export function listDispatches(root) {
+	const dir = join(root, "dispatches");
+	if (!existsSync(dir)) return [];
+	return readdirSync(dir)
+		.filter((name) => name.endsWith(".json"))
+		.map((name) => {
+			try {
+				return readJson(join(dir, name));
+			} catch {
+				return null;
+			}
+		})
+		.filter((record) => record !== null)
+		.sort((a, b) => (a.recordedAt < b.recordedAt ? 1 : -1));
+}
+
+/**
  * Return a claimed delivery to the queue (hand-off failed). `attempt` is kept so
  * retries stay visible on the same deliveryId.
  *

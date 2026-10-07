@@ -95,9 +95,28 @@ Mode B is what worker orchestrators do well; it is worth having for disposable,
 parallel workers. It is **not** the project's differentiator, and P3 does not wait
 for it.
 
-### P4.5 — Visible Executor Mode *(recon complete, implementation not started)*
+### P4.4 — Current Session Control *(done, verified)*
 
-The gap this closes: a delegated task today waits for a human to give DSH a turn.
+The receiver can now wake **the session the user is looking at**, so a delegated instruction no
+longer waits for a human to give DSH a turn:
+
+```text
+Codex → HarnessMux → bound idle DSH session → resume + followup → turn opens → the user watches it
+```
+
+Verified on a real host: `pump: claimed …` then `pump: woke <session> for …`, the host reporting
+`agent/status -> running` without anyone touching DSH, and the marker found in that session's own
+event log. See [REPORT-current-session-control.md](REPORT-current-session-control.md).
+
+Boundaries that make it safe: only a **delegated** delivery on an explicitly **delegated binding**
+may wake a session. Advisory work and unbound deliveries behave exactly as before — `awaitingBinding`
+is still legal and nothing is ever guessed. `watchIntervalMs` sets the worst-case wake latency
+(10 s by default).
+
+Still open from this stage: automatic capture of the final assistant text (the reply path is
+currently the model's own tool call), and the Codex-side lifecycle re-check.
+
+### P4.5 — Visible Executor Mode *(recon complete, implementation not started)*The gap this closes: a delegated task today waits for a human to give DSH a turn.
 
 ```text
 Codex → HarnessMux → DSH idle → delivery queued → (a person must touch DSH)
