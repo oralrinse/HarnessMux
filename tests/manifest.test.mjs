@@ -92,4 +92,43 @@ assert.equal(typeof plugin.bridgeRoot, "function", "the plugin exports bridgeRoo
 	assert.equal(existsSync(CACHE_V1) ? readFileSync(CACHE_V1, "utf8") : null, original, "the shared cache is restored after the test");
 }
 
+// --- documentation must not disagree with the default it describes ---------------
+// A default is easy to change and easy to forget. This happened for real: the interactive watch
+// interval was lowered from 10 s to 2 s, and the live documentation kept telling users to expect 10 s —
+// in the very tables they would read to judge latency. Nothing caught it, because prose has no tests.
+//
+// The assertion reads the default out of the source and derives what the documents must say, so
+// changing the default again updates what is expected here instead of rotting this test.
+{
+	const receiverSource = readFileSync(join(PLUGIN_DIR, "index.js"), "utf8");
+	const declared = receiverSource.match(/DEFAULT_WATCH_INTERVAL_MS = ([\d_]+)/u);
+	assert.notEqual(declared, null, "the receiver declares a default watch interval");
+
+	const ms = Number(declared[1].replaceAll("_", ""));
+	assert.equal(Number.isFinite(ms), true, "and it is a number");
+	const seconds = ms / 1_000;
+	assert.equal(Number.isInteger(seconds), true, `a whole number of seconds is assumed; got ${ms} ms`);
+
+	// Every live document that states the default must state this one. Historical reports are excluded
+	// on purpose: they record what a named commit did, and rewriting them would destroy the evidence.
+	const live = ["README.md", "README.zh.md", join("docs", "receiver-api.md"), join("docs", "roadmap.md")];
+	for (const relative of live) {
+		const text = readFileSync(join(REPO, relative), "utf8");
+		assert.equal(text.includes("10 s by default"), false, `${relative} does not claim the old default`);
+		assert.equal(text.includes("10 秒"), false, `${relative} does not claim the old default in Chinese`);
+		assert.equal(/(the pump runs on a )10 s tick/u.test(text), false, `${relative} does not claim the old pump tick`);
+	}
+
+	// The two documents that state the number in words must state the current one.
+	const english = readFileSync(join(REPO, "README.md"), "utf8");
+	assert.match(english, new RegExp(`${seconds} s by default`, "u"), "README.md states the current default");
+	const chinese = readFileSync(join(REPO, "README.zh.md"), "utf8");
+	assert.match(chinese, new RegExp(`默认 ${seconds} 秒`, "u"), "README.zh.md states the current default");
+
+	// A historical report is allowed — required, even — to keep the value it measured. If this ever
+	// starts failing because someone "modernised" the reports, that is the regression this catches.
+	const historical = readFileSync(join(REPO, "docs", "REPORT-attempt-ownership.md"), "utf8");
+	assert.match(historical, /watchMs=10000/u, "a historical report keeps the mounted value it recorded");
+}
+
 console.log("manifest.test.mjs: all assertions passed");

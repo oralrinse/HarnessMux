@@ -62,7 +62,7 @@ Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
 
 实际含义：
 
-- **你不需要在 DSH 里按回车。** 发给「已显式绑定且 delegated 的空闲会话」的指令会自己开启回合；最坏延迟为一个 watch 周期（默认 10 秒，可用 `watchIntervalMs` 调整）。
+- **你不需要在 DSH 里按回车。** 发给「已显式绑定且 delegated 的空闲会话」的指令会自己开启回合；最坏延迟为一个 watch 周期（默认 2 秒，可用 `watchIntervalMs` 调整）。
 - **你能看着它干。** 工作发生在真实会话里，有真实对话记录（模型输出与工具调用），不是隐藏 worker。
 - **只有被授权的绑定才会唤醒任何东西。** 需要 `delegated` 投递 **且** `delegated` 绑定。发给普通会话的 `advisory` 留言仍然等你，未绑定的线程保持未绑定而不会被猜。
 - **回复自动回到原线程**，按 actor 寻址给提问方，Codex 在下一个生命周期事件取走。Codex 空闲时无法被唤醒——这是宿主边界，本项目不做虚假承诺。
@@ -93,7 +93,7 @@ Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
 | 边界 | 说明 |
 |---|---|
 | **空闲唤醒需要授权** | 只有 `delegated` 投递 **且** 该线程是显式 `delegated` 绑定时，才会唤醒空闲会话并开启回合。发给普通会话的 `advisory` 留言仍然等你，没有绑定的投递保持排队。这是刻意的：同伴的留言不应夺走人正在用的会话。 |
-| **唤醒最坏延迟** | 一个 watch 周期——默认 10 秒，可按 profile 行配置 `watchIntervalMs`，下限 250ms。 |
+| **唤醒最坏延迟** | 一个 watch 周期——默认 2 秒，可按 profile 行配置 `watchIntervalMs`，下限 250ms。 |
 | **结果目前由模型调用工具返回** | DSH 模型调用 `reply_message`；在 `turn_end` 自动捕获最终回复**尚未实现**（[为何可达](docs/REPORT-current-session-control.md)）。 |
 | **不是 exactly-once** | 传输层按设计是 at-least-once，消费方需容忍重复的 deliveryId。 |
 | **Codex 与 Claude Code 之外的客户端** | **计划中**（P3.4）。Codex 与 Claude Code 均已真机端到端验证（见「接入客户端」）；其它客户端只有在按同样标准验证后才会列出。 |
@@ -161,7 +161,7 @@ node packages/mcp/server.mjs            # stdio；由客户端的 MCP 配置拉�
 }
 ```
 
-每个客户端看到的 8 个工具 —— `send_message`、`read_messages`、`reply_message`、
+每个客户端看到的 9 个工具 —— `send_message`、`wait_for_reply`、`read_messages`、`reply_message`、
 `list_threads`、`list_endpoints`、`list_sessions`、`bind_thread`、`get_status` ——
 全部调用同一个 protocol-v2 核心，因此**任何客户端都不可能看到不同的 `ack`/delivery/lease/binding 语义**。
 它们的契约（工具名、schema、错误语义、以及在同一 v2 状态下的行为一致性）由

@@ -141,7 +141,7 @@ negotiable.
 | Capability | Value | Evidence |
 |---|---|---|
 | `pushDelivery` | true | the plugin's pump claims and steers without a host-side request |
-| `pullDelivery` | true | the pump runs on a 10 s tick and reconciles on each pass |
+| `pullDelivery` | true | the pump runs on a 2 s tick by default and reconciles on each pass |
 | `liveSessionInjection` | true | a delivery landed inside a running Desktop session (V4-2/V4-6) |
 | `idleWake` | **false** | a queued delivery stayed queued for 45 s with every session idle |
 | `sessionRouting` | true | the bound session received it; a second live session did not |

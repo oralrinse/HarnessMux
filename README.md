@@ -65,7 +65,7 @@ you, in Codex        "Use HarnessMux to have the current DSH session reply: CURR
 What that means in practice:
 
 - **You do not press Enter in DSH.** An instruction addressed to an idle, explicitly bound session
-  opens the turn itself. Worst-case latency is one watch tick (10 s by default, `watchIntervalMs`).
+  opens the turn itself. Worst-case latency is one watch tick (2 s by default, `watchIntervalMs`).
 - **You can watch it.** The work happens in a real session with a real transcript — model output and
   tool calls — not in a hidden worker.
 - **Only an authorized binding wakes anything.** `delegated` delivery **and** a `delegated` binding.
@@ -140,7 +140,7 @@ Honest boundaries — read these before deploying:
 | Boundary | Detail |
 |---|---|
 | **Idle wake needs authorization** | Only a `delegated` delivery on an explicitly `delegated` binding opens a turn in an idle session. An `advisory` note to an ordinary conversation still waits for you, and a delivery with no binding stays queued. That is deliberate: a peer's note must not seize a session a human is using. |
-| **Worst-case wake latency** | One watch tick — 10 s by default, `watchIntervalMs` per plugin row, floor 250 ms. |
+| **Worst-case wake latency** | One watch tick — 2 s by default, `watchIntervalMs` per plugin row, floor 250 ms. |
 | **Results are returned by the model's tool call** | The DSH model calls `reply_message`; automatic capture of the final assistant text at `turn_end` is **not implemented yet** ([why it is reachable](docs/REPORT-current-session-control.md)). |
 | **Not exactly-once** | The transport is at-least-once by design. Consumers tolerate duplicate delivery ids. |
 | **Codex cannot be woken while idle** | A host boundary. DSH's reply is held durably and surfaced on Codex's next `SessionStart`/`UserPromptSubmit`; it is never lost, and never interrupts. |
@@ -214,7 +214,7 @@ node packages/mcp/server.mjs            # stdio; run it from the client's MCP co
 }
 ```
 
-The eight tools every client sees — `send_message`, `read_messages`, `reply_message`,
+The nine tools every client sees — `send_message`, `wait_for_reply`, `read_messages`, `reply_message`,
 `list_threads`, `list_endpoints`, `list_sessions`, `bind_thread`, `get_status` — all
 call the same protocol-v2 core, so no client can observe a different meaning of `ack`,
 delivery, lease or binding. Their contract (names, schemas, error semantics, and

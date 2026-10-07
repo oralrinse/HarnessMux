@@ -111,7 +111,7 @@ event log. See [REPORT-current-session-control.md](REPORT-current-session-contro
 Boundaries that make it safe: only a **delegated** delivery on an explicitly **delegated binding**
 may wake a session. Advisory work and unbound deliveries behave exactly as before — `awaitingBinding`
 is still legal and nothing is ever guessed. `watchIntervalMs` sets the worst-case wake latency
-(10 s by default).
+(2 s by default).
 
 Still open from this stage: automatic capture of the final assistant text (the reply path is
 currently the model's own tool call), and the Codex-side lifecycle re-check.
