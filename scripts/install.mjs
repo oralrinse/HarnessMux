@@ -323,9 +323,10 @@ async function installCodexAdapter() {
 		"  1. add this repository as a local marketplace and install the plugin:",
 		`       codex plugin marketplace add "${REPO_ROOT}"`,
 		"       codex plugin add harnessmux@harnessmux",
-		"  2. start a new session; HarnessMux appears as an MCP server with the mailbox tools.",
+		"  2. start a NEW conversation. A thread keeps the tool set it was created with, so one",
+		"     that already existed keeps reporting — correctly — that these tools are absent.",
 		"",
-		"Verify from a session: ask Codex to call `get_status`, or inspect the roster directly.",
+		"Verify in the new thread: ask Codex to call `get_status`, or inspect the roster directly.",
 		""
 	].join("\n"));
 }
