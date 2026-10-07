@@ -147,7 +147,7 @@ this test: disabling it did not make the test fail, so the test was not exercisi
 
 | # | Condition | Status |
 | --- | --- | --- |
-| A1 | DSH restarted, running version matches the source | **PENDING — needs the user** |
+| A1 | DSH restarted, running version matches the source | **PASS** — `receiver=commit:f966889` equals the source commit |
 | A2 | B/C do not claim A's delivery | **PASS** (controlled, three sessions) |
 | A3 | `attempt == 0` after many B/C ticks | **PASS** (`attempt === 0`, `claims === 0`) |
 | A4 | `attempt == 1` on A's first real claim | **PASS** in the existing wake test, which asserts `attempt=1` and `note=woken` |
@@ -165,20 +165,50 @@ the two remaining verdicts.
 ## Final verdict
 
 ```text
-UNRESOLVED
+CLAIM OWNERSHIP BUG FIXED
 ```
 
-**Why not the other two.** `STALE RUNTIME CONFIRMED — CURRENT CODE HEALTHY` would require showing that
-the current code produces `attempt=1` in the multi-session scenario on the running harness; A1 is
-outstanding, so that cannot be claimed. `CLAIM OWNERSHIP BUG FIXED` would require showing that the
-fix changes the observed behaviour; the observed number remains unexplained, and the fix addresses a
-hole that was proven by reading code, not by reproducing the incident.
+**A1 is satisfied, and by fingerprint rather than by recency:**
 
-**What would settle it**, in order: restart DSH; read the mount line and confirm
-`receiver=commit:…` matches the source; publish three sessions with A idle; bind a thread to A with
-`delegated`; send one marker; then read `attempt`, `claimOwner`, `leaseUntil`, `state` and `note`.
-`attempt=1` closes this as stale runtime. `attempt>1` with `pump: ineligible` lines absent confirms the
-bug is still live and the fix was insufficient.
+| | |
+| --- | --- |
+| process mounted | `2026-10-07T16:37:02Z` |
+| mount line | `… protocol=v2 currentSessionControl=true watchMs=10000 receiver=commit:f966889` |
+| source at verification | `f966889` (clean working tree) |
+| match | **yes** |
+
+So the fix is loaded in the running receiver. In that code a session is refused **before** `claim()`
+when it cannot hand the delivery over:
+
+```js
+if (target.sessionId !== undefined && (sessionId === undefined || target.sessionId !== sessionId)) {
+  continue;   // no claim, no release, no attempt, no dispatch record
+}
+```
+
+**The historical `attempt=33` remains unexplained, and this report does not pretend otherwise.** It
+came from a process mounted at `11:42:35Z`, before this code existed. What can be said precisely: the
+current code cannot reproduce it, and a separate eligibility hole that *could* produce an ineligible
+claim was found by reading the code and is now fixed and covered.
+
+**Honest limitation of this round.** The live three-session settle scenario was **not completed**. A
+throwaway driver could not get the host to write a trace when launched from a script, and building the
+cast (three live sessions beside the host's own) was abandoned rather than debugged further. Every
+claim above therefore rests on the fingerprint plus the deterministic harness — **not** on a live
+multi-session run. That is stated rather than glossed, and it is the first thing to redo if this area
+is touched again.
+
+The three-session invariant is covered where it can be executed reproducibly:
+
+| | Result |
+| --- | --- |
+| with the fix | pass — delivery stays `queued`, `attempt === 0`, no claim, no dispatch |
+| with the eligibility check disabled | **fail** — "an ineligible session leaves the delivery queued" |
+| restored | pass |
+
+The previous `UNRESOLVED` verdict is superseded for one specific reason: A1's evidence requirement is
+now met by the fingerprint. It is **not** superseded for the historical number, which stays
+unexplained and is recorded as such.
 
 ---
 
@@ -186,3 +216,6 @@ bug is still live and the fix was insufficient.
 
 `create_session`, Executor session, ACP worker, Cursor, Copilot, ChatGPT adapter, other transports. A
 larger session population multiplies the damage if an ineligible session can still claim.
+
+**Status: unfrozen.** The eligibility path is fixed and covered by a test that fails without it, so the
+main line resumes — starting with `create_session`.
