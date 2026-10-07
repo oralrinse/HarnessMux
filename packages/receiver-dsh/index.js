@@ -1201,6 +1201,9 @@ export function apply(ctx, config = {}) {
 		// A synchronous throw is still possible and still has to reject this function, which awaiting
 		// covers for both cases.
 		await agent.followup(makeUserMessage(text));
+
+
+
 		return agent;
 	}
 
@@ -1382,23 +1385,76 @@ export function apply(ctx, config = {}) {
 	 *
 	 * @param {{frame?: object, agent?: object}} payload - the host event payload.
 	 */
+	/**
+	 * Recover the session id from a host attempt id.
+	 *
+	 * Attempt ids are shaped `session-<uuid>:<turn>`. This is used only to find the open execution a frame
+	 * could belong to; the execution's own recorded `sessionId`/`attemptId` are authoritative once bound,
+	 * and a mismatch is refused rather than trusted.
+	 *
+	 * @param {string} attemptId - the host's attempt id.
+	 * @returns {string} the session id, or an empty string when the shape is unexpected.
+	 */
+	function sessionIdFromAttemptId(attemptId) {
+		const text = String(attemptId ?? "");
+		const cut = text.lastIndexOf(":");
+		if (cut <= 0) return "";
+		return text.slice(0, cut);
+	}
+
 	function captureAssistantFrame(payload) {
 		try {
 			if (finalCapture === null || executionV2 === null) return;
 			const frame = payload?.frame;
 			if (frame === null || typeof frame !== "object") return;
-			const sessionId = sessionIdOfAgent(payload?.agent);
 			const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : "";
-			if (sessionId === "" || attemptId === "") return;
+			if (attemptId === "") return;
+			// The session id is deliberately NOT read from `payload.agent`. Measured on a real host, the
+			// agent on an assistant-stream payload carries no `session.header.id`, so reading it there
+			// returned an empty string and every frame was dropped: the turn opened, ran to completion, and
+			// the execution record stayed at `dispatching` forever — which looked exactly like "the turn
+			// never opened".
+			//
+			// The attempt id is the host's own key for this attempt, and its leading `<sessionId>:<turn>`
+			// form is the only place the session can be recovered from a frame. That is a *derivation for
+			// lookup*, not an identity: once an execution is bound, its recorded sessionId and attemptId
+			// take precedence and a disagreement is refused rather than followed.
+			// A session can be named by more than one id: the receiver addresses a delivery at the id it was
+			// given, while the host stamps attempts with the session's own id. Measured live those differ
+			// (`session-A-live` versus `session-<uuid>`), so matching on the attempt prefix alone finds
+			// nothing and every frame is dropped. Resolution therefore prefers identity, then falls back to
+			// *uniqueness*: if exactly one execution is outstanding, the frame can only be its. Two or more
+			// and nothing is bound — guessing which delivery a turn belongs to is the failure this layer
+			// exists to prevent.
+			const byAttempt = executionV2.executionForAttempt(root, attemptId);
+			const bySession = executionV2.outstandingExecution(root, sessionIdFromAttemptId(attemptId));
+			const outstanding = executionV2.outstandingExecutions(root);
+			const open = byAttempt ?? bySession ?? (outstanding.length === 1 ? outstanding[0] : null);
+			if (open === null) {
+				diagnoseOnChange(
+					`unmatched:${attemptId}`,
+					String(outstanding.length),
+					`capture: attempt ${attemptId} matches no execution and ${outstanding.length} are outstanding; not binding`
+				);
+				return;
+			}
+			const sessionId = open.sessionId;
+			if (sessionId === "") return;
+			if (open !== null && open.attemptId !== null && open.attemptId !== attemptId) {
+				diagnoseOnChange(
+					`attempt-mismatch:${sessionId}`,
+					attemptId,
+					`capture: frame attempt ${attemptId} does not match the outstanding execution's ${open.attemptId}; not binding`
+				);
+				return;
+			}
 
 			const key = finalCapture.attemptKey(sessionId, attemptId);
 			let record = OPEN_ACCUMULATORS.get(key);
 			if (record === undefined) {
-				// Only start tracking an attempt that some open execution is actually waiting for. An
-				// unrelated turn in the same session must not be captured — the mistake made during
-				// reconnaissance was treating a pre-existing turn's frames as the new task's.
-				const open = executionV2.outstandingExecution(root, sessionId);
-				if (open === null) return;
+				// The execution resolved above is the one this attempt belongs to. Re-resolving it here by
+				// session id used to shadow that decision and fail, because the delivery's session id and the
+				// host's attempt id name the same session differently.
 				if (open.attemptId === null) {
 					executionV2.attachAttempt(root, open.executionId, { attemptId, turn: finalCapture.turnFromAttemptId(attemptId) });
 					diagnose(`capture: bound execution ${open.executionId} to attempt ${attemptId}`);

@@ -278,8 +278,13 @@ withRoot((root) => {
 	// A failed hand-off must be explained, never left looking live.
 	assert.match(source, /markExecutionFailed/u, "a failed dispatch is recorded as failed");
 	// Frames are captured only for an attempt some execution is actually waiting on, which is what stops
-	// an unrelated or pre-existing turn from being adopted.
-	assert.match(source, /outstandingExecution\(root, sessionId\)/u, "capture is gated on an outstanding execution");
+	// an unrelated or pre-existing turn from being adopted. Resolution prefers identity — an execution
+	// already bound to this attempt, or one whose session the attempt names — and only falls back to
+	// uniqueness when exactly one execution is outstanding. Guessing between several is refused.
+	assert.match(source, /executionForAttempt\(root, attemptId\)/u, "capture resolves by attempt identity first");
+	assert.match(source, /outstandingExecutions\(root\)/u, "and consults how many executions are outstanding");
+	assert.match(source, /outstanding\.length === 1 \? outstanding\[0\] : null/u, "binding by uniqueness only when there is exactly one");
+	assert.match(source, /not binding/u, "and refuses rather than guessing when there are several");
 	assert.match(source, /ctx\.on\("agent\/assistant-stream", captureAssistantFrame\)/u, "and the stream is subscribed once");
 }
 

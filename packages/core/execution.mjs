@@ -254,6 +254,20 @@ export function staleExecutions(root, staleMs = 300_000) {
  * @param {string} sessionId - the session.
  * @returns {object|null} the outstanding record, or null.
  */
+export function outstandingExecutions(root) {
+	const live = listExecutions(root).filter(
+		(record) => record.state === "dispatching" || record.state === "running" || record.state === "turn_completed"
+	);
+	return live;
+}
+
+/**
+ * The one execution currently awaiting a final answer for a session, if any.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} sessionId - the session.
+ * @returns {object|null} the outstanding record, or null.
+ */
 export function outstandingExecution(root, sessionId) {
 	const live = listExecutions(root).filter(
 		(record) => record.sessionId === sessionId && (record.state === "dispatching" || record.state === "running" || record.state === "turn_completed")
