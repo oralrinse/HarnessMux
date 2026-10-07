@@ -328,6 +328,14 @@ function runHook(bridgeRoot, extraEnv = {}) {
 			true,
 			"a foreign hook is preserved untouched"
 		);
+
+		// Idempotent: a second install must report nothing replaced and must not rewrite the file.
+		// Without this, removing and re-adding our own identical entry looked like a repair on every
+		// run — the file text never changed, but the report did.
+		const textBefore = readFileSync(hooksPath, "utf8");
+		const second = run("--codex");
+		assert.equal(/replaced/u.test(second), false, "a settled install reports no replacements");
+		assert.equal(readFileSync(hooksPath, "utf8"), textBefore, "and rewrites nothing");
 	} finally {
 		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}

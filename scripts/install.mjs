@@ -211,6 +211,20 @@ function codexHooks() {
  * @param {object} hook - one hook entry from `hooks.json`.
  * @returns {boolean} true when this adapter owns it.
  */
+/** The exact commands this adapter wants installed, as a set for membership tests. */
+const wantedCommandSet = new Set(Object.values(codexHooks()));
+
+/**
+ * Whether a command string (not a hook object) belongs to this adapter.
+ *
+ * @param {string} command - the command text.
+ * @returns {boolean} true when this adapter wrote it.
+ */
+function isOurHookText(command) {
+	if (typeof command !== "string") return false;
+	const script = command.includes("pending.mjs") || command.includes("pending-shim.cmd");
+	return script && command.includes("--actor codex");
+}
 function isOurHook(hook) {
 	if (typeof hook?.command !== "string") return false;
 	const script = hook.command.includes("pending.mjs") || hook.command.includes("pending-shim.cmd");
@@ -532,15 +546,21 @@ async function installCodexAdapter() {	const paths = codexPaths();
 	const wanted = codexHooks();
 	let hooksChanged = 0;
 	let hooksReplaced = 0;
+	// Existing state, recorded per event *and* globally before anything is removed.
+	const currentFor = (event) => (Array.isArray(hooksDoc.hooks[event]) ? hooksDoc.hooks[event] : []).flatMap((group) => (group?.hooks ?? []).map((hook) => hook?.command));
+	const before = Object.fromEntries(Object.keys(hooksDoc.hooks).map((event) => [event, currentFor(event)]));
+	const beforeAll = Object.values(before).flat();
+	// Entries we own that are not already the exact command we write are stale, wherever they sit.
+	const stale = beforeAll.filter((command) => wantedCommandSet.has(command) === false && isOurHookText(command));
+	hooksReplaced = stale.length;
+
 	for (const event of new Set([...Object.keys(hooksDoc.hooks), ...Object.keys(wanted)])) {
 		const groups = Array.isArray(hooksDoc.hooks[event]) ? hooksDoc.hooks[event] : [];
 		const kept = [];
 		for (const group of groups) {
+			// Our own entries are removed here and re-added below, so that every event ends up with
+			// exactly one — whether it had none, one, or several.
 			const remaining = (group?.hooks ?? []).filter((hook) => !isOurHook(hook));
-			if (remaining.length !== (group?.hooks ?? []).length) {
-				hooksChanged += 1;
-				hooksReplaced += 1;
-			}
 			if (remaining.length > 0) kept.push({ ...group, hooks: remaining });
 		}
 		hooksDoc.hooks[event] = kept;
@@ -548,12 +568,19 @@ async function installCodexAdapter() {	const paths = codexPaths();
 	for (const [event, command] of Object.entries(wanted)) {
 		hooksDoc.hooks[event] ??= [];
 		hooksDoc.hooks[event].push({ hooks: [{ type: "command", command, timeoutSec: 20 }] });
-		hooksChanged += 1;
 	}
 	// Drop an event key we emptied rather than leaving an empty array behind.
 	for (const [event, groups] of Object.entries(hooksDoc.hooks)) {
 		if (Array.isArray(groups) && groups.length === 0) delete hooksDoc.hooks[event];
 	}
+	const after = Object.fromEntries(Object.keys(hooksDoc.hooks).map((event) => [event, currentFor(event)]));
+	// The file is written only when the result actually differs from what was there. Removing and
+	// re-adding an identical entry leaves identical text, and treating that as a change made a
+	// correct install look like it repaired something on every run.
+	const unchanged = JSON.stringify(before) === JSON.stringify(after)
+		&& JSON.stringify(Object.keys(before).sort()) === JSON.stringify(Object.keys(after).sort());
+	hooksChanged = unchanged ? 0 : 1;
+	if (stale.length > 0) hooksChanged = 1;
 	if (hooksChanged > 0 && !dryRun) {
 		if (existsSync(paths.hooks)) backup(paths.hooks);
 		writeFileSync(paths.hooks, `${JSON.stringify(hooksDoc, null, 2)}\n`, "utf8");

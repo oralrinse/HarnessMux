@@ -49,6 +49,19 @@ So when a message does not arrive:
    retroactive for a delivery that was already created);
 3. if it was bound, `list_endpoints` — does the endpoint report a live session? A
    receiver publishes its sessions **while it runs**, so an offline harness shows none.
+4. if the binding is `delegated` and the session is idle, no one has to touch the
+   harness: it opens a turn for the delivery. Allow one watch tick before deciding
+   anything is wrong.
+5. if the binding is `advisory`, or there is none, the delivery legitimately waits.
+   That is not a failure to report — but do tell the user the work is queued and why.
+
+## Answering, and being answered
+
+`reply_message` keeps the parent's thread and topic, and it addresses the answer to the
+actor that asked. So an answer reaches the sender even when the thread is still bound to
+the session that did the work — a bound thread says where *work* goes, not where a
+*result* returns. Reading never consumes, so an answer stays available until the asker
+collects it on its next turn.
 
 ## Trust: advisory vs delegated
 
@@ -72,12 +85,21 @@ same message is delivered again with the same `deliveryId` and an incremented
 - For business-level idempotency, carry your own `taskId` inside the thread.
 - Never build logic that assumes exactly-once; the transport will not provide it.
 
-## What this connection cannot do
+## What this connection can and cannot do
 
-- **It cannot wake an idle harness session.** Delivery happens while the session is
-  running. A delivery sent while the harness is idle waits in the queue and lands in
-  the first turn that runs afterwards. Say so plainly instead of reporting a failure.
-- **It cannot reach a session that never starts.** If nothing runs, nothing is
-  delivered — the message is safe, not delivered.
-- **It is not a task runner.** An acknowledged delivery means the harness accepted the
-  message, not that the work is finished. Ask on the thread for the outcome.
+- **It can wake an idle harness session — when the thread is bound and `delegated`.** That session
+  starts a turn by itself; you do not need anyone to type in the harness UI, and the caller sees the
+  work happen rather than a hidden worker. Two conditions, both required: the thread has a binding
+  that names the session, and the message is `delegated`. Since the session may be idle, expect the
+  first response after at most one watch tick rather than instantly.
+- **It will not wake anything else.** With `mode=advisory`, or with no binding, a delivery waits in
+  the queue and lands in the first turn that session runs afterwards. That is deliberate: a peer's
+  note must not take over a conversation a human is using. Say so plainly instead of reporting a
+  failure.
+- **It cannot reach a session that never starts.** If nothing runs, nothing is delivered — the
+  message is safe, not delivered.
+- **It is not a task runner.** An acknowledged delivery means the harness accepted the message, not
+  that the work is finished. Ask on the thread for the outcome.
+- **A reply goes back to whoever asked.** Answer on the thread and the answer is addressed to the
+  sender, so it reaches them even while the thread stays bound to the session doing the work. On the
+  receiving side, a reply is not consumed by reading — the sender collects it on its next turn.
