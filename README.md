@@ -177,12 +177,15 @@ Two things worth knowing, both found by running it rather than by reading about 
 - **MCP tools are loaded by the CLI, not by the Codex desktop/VS Code app.** Measured on this
   machine: every `codex exec` session registers the server and its calls appear as
   `mcp: harnessmux/get_status started/completed`, while across **54 desktop sessions**
-  (`originator=codex_work_desktop`, `source=vscode`) no MCP call is ever logged — and the
-  globally configured `node_repl` server is absent there too, so this is not specific to
-  HarnessMux. In the desktop app the model can still *read* the skill, which is why it can
-  describe HarnessMux while having no tools to call. **Delegate from the Codex CLI**, or use
-  another verified client (Claude Code). Whether the desktop profile can be made to load MCP
-  servers at all is an open question, not something this plugin can decide.
+  (`originator=codex_work_desktop`, `source=vscode`) no MCP call is ever logged. What the
+  desktop app *does* expose is its own bundled server — sessions reference
+  `mcp__codex_app__load_workspace_dependencies` — so it mounts a curated set, not the ones a
+  plugin or `config.toml` declares. The globally configured `node_repl` is absent there for the
+  same reason, which is what rules out a HarnessMux-specific cause. In the desktop app the model
+  can still *read* the skill, which is why it can describe HarnessMux while having no tools to
+  call. **Delegate from the Codex CLI**, or use another verified client (Claude Code). Whether
+  the desktop profile can be pointed at third-party MCP servers is a question about that app,
+  not about this plugin.
 
 The pick-up hook is a *pull*: it lists what is waiting and never consumes it, so an idle
 Codex is not woken — it simply loses nothing. `node scripts/install.mjs --codex --uninstall`
