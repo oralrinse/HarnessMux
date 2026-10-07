@@ -229,21 +229,31 @@ function resolveNodeForMcp() {
 	if (explicit && existsSync(explicit)) return explicit;
 	// A system installation is preferred over whatever node happens to be running this script:
 	// the plugin has to keep working when the editor, or the shell that ran the installer, is
-	// gone. Candidate order is "stable first, incidental last".
-	const candidates = [
-		"C:\\Program Files\\nodejs\\node.exe",
-		join(homedir(), "AppData", "Roaming", "npm", "node.exe"),
-		join(homedir(), "AppData", "Local", "Programs", "nodejs", "node.exe"),
-		join(process.env["ProgramFiles"] ?? "C:\\Program Files", "nodejs", "node.exe")
-	];
-	// The Codex desktop app ships a node runtime; the versioned directory is discovered rather
-	// than pinned, so a Codex update does not invalidate this.
-	const runtimes = join(homedir(), "AppData", "Local", "OpenAI", "Codex", "runtimes", "cua_node");
-	try {
-		for (const entry of readdirSync(runtimes)) candidates.push(join(runtimes, entry, "bin", "node.exe"));
-	} catch {
-		// No bundled runtime is a normal outcome on a machine without the desktop app.
+	// gone. Candidate order is "stable first, incidental last", and the platform-specific lists
+	// are separate so a POSIX machine is not left with only the last resort.
+	const candidates = [];
+	if (process.platform === "win32") {
+		candidates.push(
+			"C:\\Program Files\\nodejs\\node.exe",
+			join(homedir(), "AppData", "Roaming", "npm", "node.exe"),
+			join(homedir(), "AppData", "Local", "Programs", "nodejs", "node.exe"),
+			join(process.env["ProgramFiles"] ?? "C:\\Program Files", "nodejs", "node.exe")
+		);
+		// The Codex desktop app ships a node runtime; the versioned directory is discovered
+		// rather than pinned, so a Codex update does not invalidate this.
+		const runtimes = join(homedir(), "AppData", "Local", "OpenAI", "Codex", "runtimes", "cua_node");
+		try {
+			for (const entry of readdirSync(runtimes)) candidates.push(join(runtimes, entry, "bin", "node.exe"));
+		} catch {
+			// No bundled runtime is a normal outcome on a machine without the desktop app.
+		}
+	} else {
+		candidates.push("/usr/local/bin/node", "/usr/bin/node", "/opt/homebrew/bin/node", join(homedir(), ".local", "bin", "node"));
 	}
+	// Whatever `node` resolves to on this shell's PATH, which covers nvm/fnm/volta layouts that
+	// no fixed list can enumerate. Skipped when it is the same incidental interpreter as below.
+	const onPath = whichNode();
+	if (onPath !== null) candidates.push(onPath);
 	// Last resort: the interpreter running this script. On a machine with no system-wide node —
 	// this one, for example, where the only node belongs to an editor's toolchain — this is what
 	// gets written, and it is a genuinely fragile choice: moving or removing that editor breaks
@@ -253,6 +263,26 @@ function resolveNodeForMcp() {
 		if (typeof candidate === "string" && candidate !== "" && existsSync(candidate)) return candidate;
 	}
 	return null;
+}
+
+/**
+ * The absolute path `node` resolves to on this process's PATH, or null.
+ *
+ * `process.execPath` would be wrong here: it is the interpreter running the *installer*, which is
+ * not necessarily what the user's shell means by `node`. Asking the shell is what makes nvm,
+ * fnm and volta layouts work without enumerating them.
+ *
+ * @returns {string|null} an absolute path, or null when `node` is not on PATH.
+ */
+function whichNode() {
+	const probe = process.platform === "win32" ? ["cmd", "/d", "/s", "/c", "where node"] : ["sh", "-c", "command -v node"];
+	try {
+		const out = execFileSync(probe[0], probe.slice(1), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		const first = out.split(/\r?\n/u).map((line) => line.trim()).find((line) => line !== "");
+		return first && existsSync(first) ? first : null;
+	} catch {
+		return null;
+	}
 }
 
 /**

@@ -82,24 +82,24 @@ Honest boundaries — read these before deploying:
 ```sh
 git clone <this repo> agent-interlink
 cd agent-interlink
-node lib/mailbox-v2.mjs --root ./bridge init
-npm test                       # 8 suites, offline, no API keys
+node packages/cli/mailbox-v2.mjs --root ./bridge init
+npm test                       # 13 suites, offline, no API keys
 ```
 
 Send a message and watch it be delivered:
 
 ```sh
-node lib/mailbox-v2.mjs --root ./bridge endpoint --id dsh-endpoint --actor dsh
-node lib/mailbox-v2.mjs --root ./bridge send --from codex --topic "ship it" --body "run the suite"
-node lib/mailbox-v2.mjs --root ./bridge bind  <threadId> --endpoint dsh-endpoint --session <sessionId> --mode delegated
-node lib/mailbox-v2.mjs --root ./bridge inbox --actor dsh
+node packages/cli/mailbox-v2.mjs --root ./bridge endpoint --id dsh-endpoint --actor dsh
+node packages/cli/mailbox-v2.mjs --root ./bridge send --from codex --topic "ship it" --body "run the suite"
+node packages/cli/mailbox-v2.mjs --root ./bridge bind  <threadId> --endpoint dsh-endpoint --session <sessionId> --mode delegated
+node packages/cli/mailbox-v2.mjs --root ./bridge inbox --actor dsh
 ```
 
 Ask a **live** session to prove the loop (`<sessionId>` is what your client/harness
 reports; with DSH it is `$DSH_SESSION_ID`):
 
 ```sh
-node tests/ask-session.mjs <sessionId> --marker HELLO-1
+node examples/live/ask-session.mjs <sessionId> --marker HELLO-1
 # status goes queued → acked while that session is running a turn
 ```
 
@@ -178,11 +178,24 @@ Two things worth knowing, both found by running it rather than by reading about 
   PATH.** `.mcp.json` says `"command": "node"`, which the CLI resolves and the Codex desktop app
   does not — its log recorded `mcp_extension_tool_discovery_failed … "MCP startup failed: No such
   file or directory (os error 2)" pluginId=harnessmux@harnessmux`. The plugin was installed,
-  enabled and *discovered*, and its server was never started. `scripts/install.mjs --codex`
-  therefore rewrites the copies Codex loads with an absolute node (preferring a system install,
-  then the runtime Codex itself ships; `HARNESSMUX_NODE` overrides the choice). The repository
-  keeps the portable template — an absolute path there would publish one machine's layout.
-  Re-run the installer after `codex plugin add` so the cached copy gets the absolute path.
+  enabled and *discovered*, and its server was never started.
+
+  `scripts/install.mjs --codex` therefore rewrites the copies Codex loads with an absolute node,
+  choosing in this order: `HARNESSMUX_NODE` (or `CODEX_MCP_NODE_PATH`) → a system installation →
+  whatever `node` resolves to on your PATH, which covers nvm/fnm/volta layouts → the runtime Codex
+  itself ships → the interpreter that ran the installer. **If none of those is right for your
+  machine, set `HARNESSMUX_NODE` and re-run.** The repository keeps the portable template, because
+  an absolute path there would publish one machine's layout.
+
+  Two consequences worth knowing:
+
+  - **Order matters.** Run `codex plugin add harnessmux@harnessmux` *first*, then re-run the
+    installer: the plugin is copied into `<CODEX_HOME>/plugins/cache/`, and that copy is what
+    needs the absolute path. The installer says so when it finds no cache yet, and it walks the
+    cache (rather than a pinned version directory) so an update cannot leave a stale path behind.
+  - **A path can go stale.** If you uninstall the runtime that was chosen, or reinstall the plugin
+    without re-running the installer, the server will not start; re-running the installer fixes
+    it, and the desktop log names the reason.
 
 The pick-up hook is a *pull*: it lists what is waiting and never consumes it, so an idle
 Codex is not woken — it simply loses nothing. `node scripts/install.mjs --codex --uninstall`
@@ -249,7 +262,7 @@ tools/relink.mjs         repairs relative imports after a layout move
 ## Tests
 
 ```sh
-npm test          # 9 suites: protocol, CLI, migration, receiver, MCP contract, faults
+npm test          # 13 suites: protocol, CLI, migration, receiver, MCP contract, adapters, faults
 npm run test:live # against a real DSH harness + real model (needs DSH installed)
 npm run mcp       # start the MCP server by hand to inspect the roster
 ```

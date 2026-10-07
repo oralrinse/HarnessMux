@@ -75,23 +75,23 @@ Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
 ```sh
 git clone <本仓库> agent-interlink
 cd agent-interlink
-node lib/mailbox-v2.mjs --root ./bridge init
-npm test                       # 8 套测试，离线，不需要 API key
+node packages/cli/mailbox-v2.mjs --root ./bridge init
+npm test                       # 13 套测试，离线，不需要 API key
 ```
 
 发一条消息并看它被投递：
 
 ```sh
-node lib/mailbox-v2.mjs --root ./bridge endpoint --id dsh-endpoint --actor dsh
-node lib/mailbox-v2.mjs --root ./bridge send --from codex --topic "ship it" --body "run the suite"
-node lib/mailbox-v2.mjs --root ./bridge bind  <threadId> --endpoint dsh-endpoint --session <sessionId> --mode delegated
-node lib/mailbox-v2.mjs --root ./bridge inbox --actor dsh
+node packages/cli/mailbox-v2.mjs --root ./bridge endpoint --id dsh-endpoint --actor dsh
+node packages/cli/mailbox-v2.mjs --root ./bridge send --from codex --topic "ship it" --body "run the suite"
+node packages/cli/mailbox-v2.mjs --root ./bridge bind  <threadId> --endpoint dsh-endpoint --session <sessionId> --mode delegated
+node packages/cli/mailbox-v2.mjs --root ./bridge inbox --actor dsh
 ```
 
 让一个**活着的**会话验证闭环（`<sessionId>` 是客户端/harness 报告的会话 id；DSH 下为 `$DSH_SESSION_ID`）：
 
 ```sh
-node tests/ask-session.mjs <sessionId> --marker HELLO-1
+node examples/live/ask-session.mjs <sessionId> --marker HELLO-1
 # 该会话跑回合期间，状态从 queued 变成 acked
 ```
 
@@ -190,7 +190,7 @@ tools/relink.mjs          目录搬迁后修复相对引用
 ## 测试
 
 ```sh
-npm test          # 9 套：协议、CLI、迁移、receiver、MCP 契约、故障注入
+npm test          # 13 套：协议、CLI、迁移、receiver、MCP 契约、两个 adapter、故障注入
 npm run test:live # 对真实 DSH harness + 真实模型（需要装好 DSH）
 npm run mcp       # 手工启动 MCP server，检查工具清单
 ```
