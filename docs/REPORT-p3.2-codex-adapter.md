@@ -15,6 +15,13 @@ Codex ── HarnessMux adapter ── shared MCP (8 tools) ── protocol v2 �
 
 ---
 
+> **Which Codex surface this applies to.** Every condition below was measured with the
+> **Codex CLI** (`codex exec`, `originator=codex_exec`). It does **not** hold for the Codex
+> desktop / VS Code app (`originator=codex_work_desktop`, `source=vscode`), which was measured
+> later and never registers an MCP server at all — not this plugin's, and not the globally
+> configured `node_repl` either, across 54 sessions. See the README's Codex section. The
+> conditions remain accurate for the CLI, where they were taken.
+
 ## C1 — Codex sees the HarnessMux MCP tools ✅
 
 `codex exec` run in the workspace, asked to call `get_status`:

@@ -174,11 +174,15 @@ Two things worth knowing, both found by running it rather than by reading about 
   the installer writes them into `~/.codex/hooks.json` instead, with **absolute** paths:
   Codex resolves a hook command against `~/.codex`, not against the plugin root, and a
   relative command there fails with `Cannot find module`.
-- **A conversation that already existed does not gain the tools.** A Codex thread keeps the
-  tool set it was created with, so a thread started before the plugin was installed reports —
-  correctly — that the HarnessMux tools are unavailable, even though the plugin is enabled.
-  Start a **new thread** after installing; verified both ways: the old thread's own probe of
-  its tool list returned `[]` while a new thread called `get_status` immediately.
+- **MCP tools are loaded by the CLI, not by the Codex desktop/VS Code app.** Measured on this
+  machine: every `codex exec` session registers the server and its calls appear as
+  `mcp: harnessmux/get_status started/completed`, while across **54 desktop sessions**
+  (`originator=codex_work_desktop`, `source=vscode`) no MCP call is ever logged — and the
+  globally configured `node_repl` server is absent there too, so this is not specific to
+  HarnessMux. In the desktop app the model can still *read* the skill, which is why it can
+  describe HarnessMux while having no tools to call. **Delegate from the Codex CLI**, or use
+  another verified client (Claude Code). Whether the desktop profile can be made to load MCP
+  servers at all is an open question, not something this plugin can decide.
 
 The pick-up hook is a *pull*: it lists what is waiting and never consumes it, so an idle
 Codex is not woken — it simply loses nothing. `node scripts/install.mjs --codex --uninstall`

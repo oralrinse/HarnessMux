@@ -323,10 +323,12 @@ async function installCodexAdapter() {
 		"  1. add this repository as a local marketplace and install the plugin:",
 		`       codex plugin marketplace add "${REPO_ROOT}"`,
 		"       codex plugin add harnessmux@harnessmux",
-		"  2. start a NEW conversation. A thread keeps the tool set it was created with, so one",
-		"     that already existed keeps reporting — correctly — that these tools are absent.",
+		"  2. drive it from the Codex CLI. The desktop/VS Code app does not load MCP servers at",
+		"     all — not this plugin's, and not any server in config.toml either — so a task must",
+		"     be delegated from the CLI, where the tools are registered.",
 		"",
-		"Verify in the new thread: ask Codex to call `get_status`, or inspect the roster directly.",
+		"Verify from the CLI: ask Codex to call `get_status`; the run prints",
+		"  mcp: harnessmux/get_status started / completed",
 		""
 	].join("\n"));
 }
