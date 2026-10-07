@@ -140,6 +140,9 @@ assert.equal(status.bindings, 1, "one thread binding");
 	const original = existsSync(ROOT_CACHE) ? readFileSync(ROOT_CACHE, "utf8") : null;
 	const sentinel = mkdtempSync(join(tmpdir(), "hxmux-cli-cache-"));
 	const ephemeral = join(tmpdir(), `hxmux-cli-init-${Date.now().toString(36)}`);
+	// A root that is neither in the checkout nor under temp: the only kind that should be remembered.
+	const { homedir } = await import("node:os");
+	const realRoot = join(homedir(), `hxmux-cli-real-${Date.now().toString(36)}`);
 	try {
 		writeFileSync(ROOT_CACHE, sentinel, "utf8");
 		// Run the CLI exactly as a probe does, with `--root` supplied by the caller: the
@@ -148,16 +151,25 @@ assert.equal(status.bindings, 1, "one thread binding");
 		assert.equal(readFileSync(ROOT_CACHE, "utf8"), sentinel, "init outside the checkout does not move the remembered root");
 		// The guard is on the write itself, so a caller that forgets the opt-out cannot
 		// reintroduce the bug either.
+		//
+		// A *real* root is one that is neither inside the checkout nor under the temp directory:
+		// scratch bridges live in temp, and remembering one points every later client at a directory
+		// the test is about to delete. That is not hypothetical — an installation test using a temp
+		// `DSH_HOME` repointed the cache, and a healthy receiver was reported as "no receiver has
+		// registered yet".
 		const core = await import("../packages/core/core-v2.mjs");
-		assert.equal(core.rememberRoot(ephemeral), true, "a real root is still remembered when asked for");
-		assert.equal(readFileSync(ROOT_CACHE, "utf8"), ephemeral, "and the cache follows the explicit request");
+		assert.equal(core.rememberRoot(ephemeral), false, "a temp root is refused by the write site");
+		assert.equal(readFileSync(ROOT_CACHE, "utf8"), sentinel, "and refusing it leaves the cache alone");
+		assert.equal(core.rememberRoot(realRoot), true, "a root outside checkout and temp is still remembered when asked for");
+		assert.equal(readFileSync(ROOT_CACHE, "utf8"), realRoot, "and the cache follows the explicit request");
 		assert.equal(core.rememberRoot(join(import.meta.dirname, "test-bridge-cache-guard")), false, "an in-checkout root is refused by the write site");
-		assert.equal(readFileSync(ROOT_CACHE, "utf8"), ephemeral, "the refusal leaves the cache alone");
+		assert.equal(readFileSync(ROOT_CACHE, "utf8"), realRoot, "the refusal leaves the cache alone");
 	} finally {
 		if (original === null) rmSync(ROOT_CACHE, { force: true });
 		else writeFileSync(ROOT_CACHE, original, "utf8");
 		rmSync(sentinel, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 		rmSync(ephemeral, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+		rmSync(realRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 		rmSync(join(import.meta.dirname, "test-bridge-cache-guard"), { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}
 }

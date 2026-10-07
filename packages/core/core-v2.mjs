@@ -42,7 +42,7 @@ import {
 	unlinkSync,
 	writeFileSync
 } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -137,7 +137,19 @@ function isEphemeralRoot(root) {
 	const modulePath = resolve(fileURLToPath(import.meta.url));
 	const projectRoot = dirname(dirname(dirname(modulePath)));
 	const normalized = resolve(root);
-	return normalized === projectRoot || normalized.startsWith(`${projectRoot}${sep}`);
+	if (normalized === projectRoot || normalized.startsWith(`${projectRoot}${sep}`)) return true;
+	// A scratch bridge is usually built in the system temp directory rather than inside the
+	// checkout, and the first version of this guard only knew about the checkout. An installation
+	// test using a temp `DSH_HOME` therefore repointed the real root cache at a bridge it then
+	// deleted, and every client resolving through that cache reported "no receiver has registered
+	// yet" while a healthy receiver published to the real bridge. Matching the temp roots closes it,
+	// compared the same normalised way.
+	for (const temp of [process.env.TEMP, process.env.TMP, tmpdir()]) {
+		if (typeof temp !== "string" || temp.trim() === "") continue;
+		const normalizedTemp = resolve(temp);
+		if (normalized === normalizedTemp || normalized.startsWith(`${normalizedTemp}${sep}`)) return true;
+	}
+	return false;
 }
 
 /** Read the manifest with defaults filled in. */
