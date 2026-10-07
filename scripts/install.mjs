@@ -334,8 +334,31 @@ function refreshCachedMcpConfigs(node) {
 			continue;
 		}
 		const server = config?.mcpServers?.harnessmux;
-		if (!server || server.command === node) continue;
+		if (!server) continue;
+		// The launcher is addressed absolutely too, and for the same reason as node: the argument
+		// used to be `./scripts/launch-mcp.mjs` with `"cwd": "."`, and the host resolves both
+		// against *its own* working directory rather than the plugin root. Reproduced by running
+		// the documented command from any other directory:
+		//   Cannot find module 'C:\Users\…\scripts\launch-mcp.mjs'
+		// which is the desktop's `os error 2`. The launcher itself still locates the shared server
+		// relative to its own file, so nothing else has to be absolute.
+		const launcher = join(dirname(file), "scripts", "launch-mcp.mjs");
+		// The launcher has to be there; `codex plugin add` copies it with the manifest. Falling back
+		// to the relative argument would silently reinstate the bug this fix removes, so a missing
+		// launcher is reported instead.
+		if (!existsSync(launcher)) {
+			process.stderr.write(`harnessmux: ${launcher} is missing, so the MCP server cannot be started from the cache. Re-run \`codex plugin add harnessmux@harnessmux\` first, then this installer.\n`);
+			continue;
+		}
+		const wantedArgs = [launcher];
+		const sameArgs = JSON.stringify(server.args) === JSON.stringify(wantedArgs);
+		// `cwd: "."` is dropped: the host resolved it against its own directory anyway, and the
+		// launcher needs nothing from the working directory once it is addressed absolutely.
+		const dropCwd = server.cwd !== undefined;
+		if (server.command === node && sameArgs && !dropCwd) continue;
 		server.command = node;
+		server.args = wantedArgs;
+		delete server.cwd;
 		if (!dryRun) {
 			backup(file);
 			writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, "utf8");

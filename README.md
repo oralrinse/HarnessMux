@@ -180,12 +180,18 @@ Two things worth knowing, both found by running it rather than by reading about 
   file or directory (os error 2)" pluginId=harnessmux@harnessmux`. The plugin was installed,
   enabled and *discovered*, and its server was never started.
 
-  `scripts/install.mjs --codex` therefore rewrites the copies Codex loads with an absolute node,
-  choosing in this order: `HARNESSMUX_NODE` (or `CODEX_MCP_NODE_PATH`) → a system installation →
-  whatever `node` resolves to on your PATH, which covers nvm/fnm/volta layouts → the runtime Codex
-  itself ships → the interpreter that ran the installer. **If none of those is right for your
-  machine, set `HARNESSMUX_NODE` and re-run.** The repository keeps the portable template, because
-  an absolute path there would publish one machine's layout.
+  `scripts/install.mjs --codex` therefore rewrites the copies Codex loads so that **both** the
+  interpreter and the launcher are absolute. The launcher matters as much as node: as
+  `./scripts/launch-mcp.mjs` with `"cwd": "."`, the host resolved both against *its own* working
+  directory, which reproduces as `Cannot find module '…\scripts\launch-mcp.mjs'` — the same
+  `os error 2`. The `cwd` field is dropped for that reason; the launcher finds the shared server
+  relative to its own file.
+
+  Node is chosen in this order: `HARNESSMUX_NODE` (or `CODEX_MCP_NODE_PATH`) → a system
+  installation → whatever `node` resolves to on your PATH, which covers nvm/fnm/volta layouts →
+  the runtime Codex itself ships → the interpreter that ran the installer. **If none of those is
+  right for your machine, set `HARNESSMUX_NODE` and re-run.** The repository keeps the portable
+  template, because absolute paths there would publish one machine's layout.
 
   Two consequences worth knowing:
 

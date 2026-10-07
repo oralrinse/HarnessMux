@@ -19,7 +19,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -226,21 +226,36 @@ function runHook(bridgeRoot, extraEnv = {}) {
 	const run = (...args) => execFileSync(process.execPath, [INSTALLER, ...args], { encoding: "utf8", env });
 
 	try {
-		// Exactly what `codex plugin add` leaves behind: a copy of the portable template.
-		mkdirSync(cacheDir, { recursive: true });
+		// Exactly what `codex plugin add` leaves behind: a copy of the plugin, manifest and launcher
+		// included — the installer refuses to rewrite a cache whose launcher is missing, because a
+		// silent fallback would reinstate the relative-argument bug.
+		mkdirSync(join(cacheDir, "scripts"), { recursive: true });
 		writeFileSync(cachedFile, `${JSON.stringify(template, null, 2)}\n`, "utf8");
+		copyFileSync(join(ADAPTER, "scripts", "launch-mcp.mjs"), join(cacheDir, "scripts", "launch-mcp.mjs"));
 		assert.equal(readJson(cachedFile).mcpServers.harnessmux.command, "node", "the cache starts with the unstartable command");
 
 		const output = run("--codex");
 		assert.match(output, /cached plugin file/u, "the installer reports the cached copies it inspected");
-		const repaired = readJson(cachedFile).mcpServers.harnessmux.command;
-		assert.notEqual(repaired, "node", "the installed copy no longer relies on PATH");
-		assert.equal(isAbsolute(repaired), true, `the command is an absolute path (got ${JSON.stringify(repaired)})`);
-		assert.equal(existsSync(repaired), true, "and that path exists on this machine");
+		const repairedServer = readJson(cachedFile).mcpServers.harnessmux;
+		assert.notEqual(repairedServer.command, "node", "the installed copy no longer relies on PATH");
+		assert.equal(isAbsolute(repairedServer.command), true, `the command is an absolute path (got ${JSON.stringify(repairedServer.command)})`);
+		assert.equal(existsSync(repairedServer.command), true, "and that path exists on this machine");
+
+		// The launcher argument must be absolute too. It used to be `./scripts/launch-mcp.mjs`,
+		// which the host resolves against its own working directory rather than the plugin root:
+		// reproduced as `Cannot find module 'C:\Users\…\scripts\launch-mcp.mjs'`, the desktop's
+		// "os error 2". A relative argument here is therefore a defect even when the command is
+		// absolute.
+		assert.equal(repairedServer.args.length, 1, "one launcher argument");
+		assert.equal(isAbsolute(repairedServer.args[0]), true, `the launcher is addressed absolutely (got ${JSON.stringify(repairedServer.args[0])})`);
+		assert.equal(existsSync(repairedServer.args[0]), true, "and that launcher exists");
+		assert.equal(repairedServer.cwd, undefined, "no relative cwd is left for the host to resolve");
 
 		// Idempotent, and it never rewrites the tracked template.
 		assert.match(run("--codex"), /already correct/u, "a second install finds nothing to change");
-		assert.equal(readJson(join(ADAPTER, ".mcp.json")).mcpServers.harnessmux.command, "node", "the repository template is still portable");
+		const templateServer = readJson(join(ADAPTER, ".mcp.json")).mcpServers.harnessmux;
+		assert.equal(templateServer.command, "node", "the repository template is still portable");
+		assert.equal(templateServer.args[0], "./scripts/launch-mcp.mjs", "and keeps its plugin-relative launcher");
 	} finally {
 		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}
