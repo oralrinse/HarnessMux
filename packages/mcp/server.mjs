@@ -73,6 +73,31 @@ function renderMessage(message, delivery) {
 	return `${head}${message.replyTo ? ` replyTo=${message.replyTo}` : ""}${where}\n${message.body}`;
 }
 
+/**
+ * Would this reply be handed back to the same session that received the parent?
+ *
+ * The client runs *inside* the harness session that receives delegated work, so a delivery
+ * addressed to that session comes back to the client itself. When the thread's binding points at
+ * the session the parent was delivered to, the answer to "did the sender see my reply?" is no —
+ * the peer would have to read the thread. Naming that in the tool output is the difference between
+ * a message that looks delivered and one that is actually read.
+ *
+ * @param {string} bridge - bridge root.
+ * @param {object} delivery - the reply delivery just enqueued.
+ * @param {object} parent - the message being answered.
+ * @returns {boolean} true when the reply lands on the session that received the parent.
+ */
+function wouldLoopBack(bridge, delivery, parent) {
+	const target = delivery.target;
+	if (target === null || target === undefined) return false;
+	const parentDelivery = ["acked", "claimed", "queued"]
+		.flatMap((state) => core.listDeliveries(bridge, state))
+		.find((entry) => entry.messageId === parent.messageId);
+	if (!parentDelivery) return false;
+	const same = parentDelivery.target;
+	return same?.endpointId === target.endpointId && same?.sessionId === target.sessionId;
+}
+
 /** Human-readable target. */
 function targetLabel(target) {
 	return `${target.actor}${target.endpointId ? `@${target.endpointId}` : ""}${target.sessionId ? `#${target.sessionId}` : ""}`;
@@ -236,9 +261,19 @@ export const TOOLS = [
 				...inherited,
 				...(args.mode === "advisory" || args.mode === "delegated" ? { mode: args.mode } : {})
 			});
+			// A reply whose route is this client's own session cannot reach the peer that asked:
+			// the binding sends it straight back. That is the routing rule working, but a client
+			// reading "replied … acked" would reasonably expect the sender to have received it, so
+			// the situation is named in the output rather than left for the user to discover.
+			const loopsBack = wouldLoopBack(bridge, delivery, parent);
 			return {
-				text: `replied ${renderMessage(message, delivery)}`,
-				structured: { messageId: message.messageId, deliveryId: delivery.deliveryId, target: delivery.target, mode: delivery.mode }
+				text: [
+					`replied ${renderMessage(message, delivery)}`,
+					loopsBack
+						? "NOTE: this reply is routed back to the session that received the parent, so the peer that sent it will not see it unless it reads the thread (read_messages). To make replies return to the sender, send outbound instructions on a thread with **no binding** — an unbound reply stays unrouted and is picked up by the sender."
+						: ""
+				].filter(Boolean).join("\n"),
+				structured: { messageId: message.messageId, deliveryId: delivery.deliveryId, target: delivery.target, mode: delivery.mode, loopsBack }
 			};
 		}
 	},

@@ -219,6 +219,31 @@ let sent;
 	const orphanReply = tool("reply_message", { message_id: orphan.structuredContent.messageId, body: "no route to inherit" });
 	assert.equal(orphanReply.structuredContent.target, null, "with no binding and no parent route, the reply waits unrouted");
 	assert.match(orphanReply.content[0].text, /UNROUTED/u, "and says so plainly");
+	assert.equal(orphanReply.structuredContent.loopsBack, false, "an unrouted reply is not flagged as looping back");
+}
+
+// --- 6c. a reply that lands on the receiver's own session is called out ---------
+// The client runs inside the session that receives delegated work, so when a thread is bound to
+// that same session a reply comes straight back. The sender then sees nothing unless it reads the
+// thread. Reporting "replied … acked" alone would read as "the peer got it", which is how this was
+// discovered: the peer waited, and the reply was sitting in a thread it had not read.
+{
+	const inbound = tool("send_message", { body: "asked from the harness side", topic: "loop warning", endpoint_id: "dsh-endpoint", session_id: "session-live" });
+	tool("bind_thread", { thread_id: inbound.structuredContent.threadId, endpoint_id: "dsh-endpoint", session_id: "session-live", mode: "advisory" });
+	const loopReply = tool("reply_message", { message_id: inbound.structuredContent.messageId, body: "answering into the same session" });
+	assert.equal(loopReply.structuredContent.loopsBack, true, "the tool detects that the reply goes back to the same session");
+	assert.match(loopReply.content[0].text, /routed back to the session that received the parent/u, "and says so in words the model reads");
+	assert.match(loopReply.content[0].text, /read_messages/u, "pointing at how the sender can still collect it");
+	assert.match(loopReply.content[0].text, /no binding/u, "and at the way to avoid it next time");
+
+	// A reply that does NOT land where the parent landed is not flagged. Binding the thread to a
+	// different session is the one way to arrange that on this side.
+	const moved = tool("send_message", { body: "asked from another endpoint", topic: "no loop warning", endpoint_id: "other-endpoint", session_id: "other-session" });
+	tool("bind_thread", { thread_id: moved.structuredContent.threadId, endpoint_id: "dsh-endpoint", session_id: "session-live", mode: "advisory" });
+	const movedReply = tool("reply_message", { message_id: moved.structuredContent.messageId, body: "answer travels elsewhere" });
+	assert.equal(movedReply.structuredContent.target.sessionId, "session-live", "the binding redirects the reply away from the parent's session");
+	assert.equal(movedReply.structuredContent.loopsBack, false, "a reply that lands elsewhere is not flagged as looping back");
+	assert.equal(movedReply.content[0].text.includes("NOTE:"), false, "and carries no warning");
 }
 
 // --- 7. tool-level failures are content, not transport errors -------------------
