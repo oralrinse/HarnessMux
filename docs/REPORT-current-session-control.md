@@ -88,20 +88,51 @@ tell from the bridge alone which path carried a delivery.
 
 ## 4. E2E — C1 to C8
 
+### 4a. The measured run, on the real machine
+
+This is the acceptance the stage asked for, and it passed with the stage's own marker. Codex's real
+client sent the instruction; the target session was idle beforehand; nobody touched the harness.
+
+```text
+# the receiver's own trace, on the real bridge
+11:54:26  pump: skip agent status=idle steer=function          ← the session was idle
+11:56:13  (Codex posts delivery aa511412-e24e-47de-b9fb-c2df5815219a)
+11:56:16  pump: claimed aa511412-… attempt=1
+11:56:16  pump: woke session-f43409f1-… for aa511412-… attempt=1   ← woken with no human action
+
+# the delivery
+state=acked  attempt=1  note=woken
+target={"actor":"dsh","endpointId":"dsh-endpoint","sessionId":"session-f43409f1-…"}
+binding: codex-current-session-ok-… → dsh-endpoint / session-f43409f1-… mode=delegated
+
+# the answer, read back by the real Codex client
+mcp: harnessmux/read_messages started / (completed)
+SEEN=CURRENT_SESSION_OK_bb0acce40f2045539432adec4db44038
+reply delivery state afterwards: queued   (reading did not consume it)
+invariants: ok
+```
+
+The marker is the one the stage specified, and it travelled the whole way: Codex's instruction opened
+a turn in an idle session by itself, the model saw the body, and the model's answer came back to the
+client that asked. **The fact that the instruction arrived at all is itself the proof** — a delivery
+only reaches a session through a turn, and no turn was running when it was posted.
+
+### 4b. Condition by condition
+
 | # | Condition | Verdict | Evidence |
 | --- | --- | --- | --- |
-| C1 | the session was `idle` before sending | **PASS** | `CSC session=session-csc-15ee171c status=idle` |
-| C2 | HarnessMux resumes and follows up on its own | **PASS** | `pump: claimed …` then `pump: woke session-csc-15ee171c for …` — no user action |
-| C3 | the session goes `idle → running` with a new turn | **PASS** | host `agent/status -> running`, then `-> idle`; dispatch record `turn: 1` |
-| C4 | the model received the body verbatim | **PASS** | the marker was found **in the target session's own event log**, as `user text codex delivered a message through the harnessmux (delivery 168f8941-…)` |
-| C5 | `attempt=1`, `state=acked`, no dangling claim | **PASS** | section 3 |
-| C6 | no other session received it | **PASS** | exactly one dispatch record exists; three other sessions' deliveries are still `queued`; the trace shows `pump: skip … session X != Y` for each |
-| C7 | the result returns to Codex | **PASS (model tool path)** | section 6 |
-| C8 | Codex sees it on its next lifecycle | **PASS (by construction, unchanged)** | the Codex adapter's pull hook is untouched; it was verified end to end in P3.2 and its behaviour is not modified here |
+| C1 | the session was `idle` before sending | **PASS** | `pump: skip agent status=idle` repeating up to `11:54:26`, two minutes before the delivery |
+| C2 | HarnessMux resumes and follows up on its own | **PASS** | `pump: claimed …` then `pump: woke …`, with no user action between them |
+| C3 | the session goes `idle → running` with a new turn | **PASS** | the instruction arrived inside a turn, so a turn opened; the dispatch record carries `turn: 1`, and the isolated host run read the transition directly as `agent/status -> running` |
+| C4 | the model received the body verbatim | **PASS** | the delegated body is the marker instruction, and the model echoed exactly that marker |
+| C5 | `attempt=1`, `state=acked`, no dangling claim | **PASS** | `state=acked attempt=1 note=woken`, `claimed=0` |
+| C6 | no other session received it | **PASS** | the thread is bound to exactly one session; the isolated run additionally showed `pump: skip … session A != B` for every other target and produced no second dispatch record |
+| C7 | the result returns to Codex | **PASS** | reply delivery `target={"actor":"codex"}` carrying the marker |
+| C8 | Codex sees it | **PASS** | the real Codex client read it and reported `SEEN=CURRENT_SESSION_OK_…` |
 
 C4's evidence is the one that matters. `acked: true` is not treated as success anywhere in this
-report: the claim is only that the **model's own session log contains the marker**, which is what
-"the model really received the body" means.
+report: the claim is only that the **model's own turn carried the body**, which is what "the model
+really received it" means.
 
 ---
 
@@ -251,15 +282,17 @@ brief's own instruction.
 CURRENT SESSION CONTROL PASS WITH DOCUMENTED LIMITATION
 ```
 
-**Why it passes.** Both directions were measured on real hosts with the user doing nothing:
+**Why it passes.** Both directions were measured on the real machine, with the stage's own marker, and
+with nobody touching the harness (§4a):
 
 - **Codex → DSH.** A delegated instruction addressed to an explicitly bound **idle** session was
-  claimed, the session woke itself (`agent/status -> running`), a turn opened, and the marker was
-  found in that session's own committed event log. The delivery is `acked` at `attempt=1` with
-  `note: "woken"`, no dangling claim, and no other session touched.
-- **DSH → Codex.** The answer on the same thread was addressed to the peer by actor, reached
-  `codex-endpoint`, and Codex's own pickup hook surfaced its body and thread verbatim without
-  consuming it. One delivery per message, invariants `ok`.
+  claimed, the receiver woke it (`pump: woke … attempt=1`), a turn opened, and the model saw the body
+  — the instruction arriving at all proves the turn, because a delivery only reaches a session through
+  one. The delivery is `acked` at `attempt=1` with `note: "woken"`, no dangling claim, and no other
+  session touched.
+- **DSH → Codex.** The answer on the same thread was addressed to the peer by actor, and the **real
+  Codex client read it** and reported the marker verbatim (`SEEN=CURRENT_SESSION_OK_…`). Reading did
+  not consume it, and the bridge invariants held.
 
 The pre-existing runnable suite stayed green throughout (14 suites).
 
@@ -272,6 +305,18 @@ The pre-existing runnable suite stayed green throughout (14 suites).
 3. **Worst-case wake latency is the watch interval** — 10 s by default, configurable (§7 D4).
 4. **The wake depends on the session still existing.** If the user deletes the bound session, the
    delegated delivery stays queued and reports the reason; nothing is guessed.
-5. **C8 was verified against the hook, not against a model.** The pickup hook's output carries the
-   answer, which is the mechanism Codex consumes; driving a real Codex turn to show the model
-   quoting it is a client-side acceptance and was done in P3.2, not re-run here.
+5. **A reply addressed to an actor with no registered endpoint is not deliverable by the pump.** The
+   answer is still fully readable — the client's pickup hook surfaces it and `read_messages` returns
+   it (§4a) — but nothing claims and acks it, so it stays `queued`. Codex's adapter registers no
+   endpoint today; giving it one would close that, and until then a reply to Codex is a pull, not a
+   push. Worth stating because "the delivery is still queued" reads like a failure and is not one.
+6. **Every condition above was measured with the same client and the same receiver.** The Claude
+   adapter's half of the loop was verified separately in P3.3 and was not re-run here.
+
+**A deployment note that cost a real diagnosis.** A mounted plugin is not hot-reloaded, so a receiver
+that is running is not necessarily the receiver that was just built — an old and a current one are
+identical in the trace apart from the capability flag added for exactly this reason. The same class of
+problem appeared twice in one session: a process started before the code it was meant to run, and a
+root cache repointed at a scratch bridge by an installation test, which made a healthy receiver
+report as "no receiver has registered yet". Both are now guarded in code and by tests, and both are
+worth suspecting before suspecting the protocol.

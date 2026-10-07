@@ -126,8 +126,8 @@ Verified end to end on a real machine with a real model
 |---|---|
 | Delivery into a **running** DSH session (claim → steer → ack, exactly once) | ✅ verified |
 | **Waking an idle session** that is explicitly bound and `delegated` (resume → followup → new turn) | ✅ verified |
-| A delegated instruction reaching the model's own session transcript | ✅ verified (marker read back from the session log) |
-| The answer returning to the asking client, addressed by actor | ✅ verified (surfaced by Codex's own pickup hook) |
+| A delegated instruction reaching the model's own session transcript | ✅ verified — the delegated body carried the marker and the model echoed it verbatim |
+| The answer returning to the asking client, addressed by actor | ✅ verified — the real Codex client read the marker verbatim |
 | Session routing: bound session receives, a second live session does not | ✅ verified |
 | An `advisory`/unbound delivery is never woken and never consumed (`awaitingBinding`) | ✅ verified |
 | Crash between a successful hand-off and the ack | ✅ verified: **duplicate, not lost** |
