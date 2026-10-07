@@ -76,7 +76,7 @@ Codex • Claude Code • Cursor • VS Code / Copilot • MCP 客户端
 git clone <本仓库> agent-interlink
 cd agent-interlink
 node packages/cli/mailbox-v2.mjs --root ./bridge init
-npm test                       # 13 套测试，离线，不需要 API key
+npm test                       # 14 套测试，离线，不需要 API key
 ```
 
 发一条消息并看它被投递：
@@ -190,7 +190,7 @@ tools/relink.mjs          目录搬迁后修复相对引用
 ## 测试
 
 ```sh
-npm test          # 13 套：协议、CLI、迁移、receiver、MCP 契约、两个 adapter、故障注入
+npm test          # 14 套：协议、CLI、迁移、receiver、MCP 契约、两个 adapter、会话控制、故障注入
 npm run test:live # 对真实 DSH harness + 真实模型（需要装好 DSH）
 npm run mcp       # 手工启动 MCP server，检查工具清单
 ```

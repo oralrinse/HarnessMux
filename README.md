@@ -40,6 +40,41 @@ This project connects the two without making you the courier:
 | A peer to ask *you* something | bidirectional threads; replies stay on their thread |
 | Safety while doing it | `advisory` vs `delegated` trust, decided per binding |
 
+### The loop, end to end
+
+The point of the whole thing is that you never touch DSH to get DSH working. Verified on a real
+machine in both directions:
+
+```text
+you, in Codex        "Use HarnessMux to have the current DSH session reply: CURRENT_SESSION_OK_7F3A"
+   │
+   ├─ Codex calls send_message  ──►  bridge  ──►  DSH receiver
+   │                                                  │
+   │                                    thread is bound to that session, mode=delegated
+   │                                                  │
+   │                                    session idle? ──► resume + followup ──► a turn opens
+   │                                                  │        (you watch it run in the DSH UI)
+   │                                                  │
+   │                                    delivery acked, note=woken, attempt=1
+   │                                                  │
+   ◄─ reply_message, addressed to the asker ──────────┘
+   │
+   └─ Codex's next SessionStart / UserPromptSubmit surfaces the answer as context
+```
+
+What that means in practice:
+
+- **You do not press Enter in DSH.** An instruction addressed to an idle, explicitly bound session
+  opens the turn itself. Worst-case latency is one watch tick (10 s by default, `watchIntervalMs`).
+- **You can watch it.** The work happens in a real session with a real transcript — model output and
+  tool calls — not in a hidden worker.
+- **Only an authorized binding wakes anything.** `delegated` delivery **and** a `delegated` binding.
+  An `advisory` note to an ordinary conversation still waits for you, and an unbound thread stays
+  unbound instead of being guessed at.
+- **The answer comes back on its own thread**, addressed to whoever asked, and Codex picks it up on
+  its next lifecycle event. Codex cannot be woken while it is idle — that is a host boundary, not a
+  promise this project breaks.
+
 ### How this differs from worker orchestrators
 
 External orchestrators dispatch a task and launch or manage a **worker** to run it.
@@ -61,8 +96,11 @@ Verified end to end on a real machine with a real model
 | Capability | State |
 |---|---|
 | Delivery into a **running** DSH session (claim → steer → ack, exactly once) | ✅ verified |
+| **Waking an idle session** that is explicitly bound and `delegated` (resume → followup → new turn) | ✅ verified |
+| A delegated instruction reaching the model's own session transcript | ✅ verified (marker read back from the session log) |
+| The answer returning to the asking client, addressed by actor | ✅ verified (surfaced by Codex's own pickup hook) |
 | Session routing: bound session receives, a second live session does not | ✅ verified |
-| Unbound delivery is never consumed (`awaitingBinding`) | ✅ verified |
+| An `advisory`/unbound delivery is never woken and never consumed (`awaitingBinding`) | ✅ verified |
 | Crash between a successful hand-off and the ack | ✅ verified: **duplicate, not lost** |
 | Lease-based recovery, retry backoff, watcher singleton | ✅ verified |
 | v1 → v2 migration: legacy ids kept, `read/` never becomes an ack, idempotent | ✅ verified |
@@ -72,9 +110,12 @@ Honest boundaries — read these before deploying:
 
 | Boundary | Detail |
 |---|---|
-| **No idle wake** | Delivery happens while the session is running. An idle session is not woken; the delivery waits. *Running session → near-real-time; idle session → next time it runs.* |
+| **Idle wake needs authorization** | Only a `delegated` delivery on an explicitly `delegated` binding opens a turn in an idle session. An `advisory` note to an ordinary conversation still waits for you, and a delivery with no binding stays queued. That is deliberate: a peer's note must not seize a session a human is using. |
+| **Worst-case wake latency** | One watch tick — 10 s by default, `watchIntervalMs` per plugin row, floor 250 ms. |
+| **Results are returned by the model's tool call** | The DSH model calls `reply_message`; automatic capture of the final assistant text at `turn_end` is **not implemented yet** ([why it is reachable](docs/REPORT-current-session-control.md)). |
 | **Not exactly-once** | The transport is at-least-once by design. Consumers tolerate duplicate delivery ids. |
-| **Clients beyond Codex and Claude Code** | **Planned** (P3.4). Codex and Claude Code are each verified end to end on a real machine (see *Connect a client*); every other client is listed only after it is verified the same way. |
+| **Codex cannot be woken while idle** | A host boundary. DSH's reply is held durably and surfaced on Codex's next `SessionStart`/`UserPromptSubmit`; it is never lost, and never interrupts. |
+| **Clients beyond Codex and Claude Code** | **Planned** (P3.4). Codex and Claude Code are each verified end to end on a real machine (see *Connect a client*); every other client is listed only after it is verified the same way. Codex's **desktop app** does not load third-party MCP servers, so drive Codex from its CLI. |
 | **One receiver** | DeepSeek Harness is the only receiver implemented. The receiver interface is specified, not built ([receiver-api.md](docs/receiver-api.md)). |
 
 ## Quick start
@@ -83,7 +124,7 @@ Honest boundaries — read these before deploying:
 git clone <this repo> agent-interlink
 cd agent-interlink
 node packages/cli/mailbox-v2.mjs --root ./bridge init
-npm test                       # 13 suites, offline, no API keys
+npm test                       # 14 suites, offline, no API keys
 ```
 
 Send a message and watch it be delivered:
@@ -95,12 +136,12 @@ node packages/cli/mailbox-v2.mjs --root ./bridge bind  <threadId> --endpoint dsh
 node packages/cli/mailbox-v2.mjs --root ./bridge inbox --actor dsh
 ```
 
-Ask a **live** session to prove the loop (`<sessionId>` is what your client/harness
-reports; with DSH it is `$DSH_SESSION_ID`):
+Ask a session to prove the loop (`<sessionId>` is what your client/harness reports):
 
 ```sh
 node examples/live/ask-session.mjs <sessionId> --marker HELLO-1
-# status goes queued → acked while that session is running a turn
+# a delegated, bound session is woken even when idle: status goes queued → acked with note=woken
+# an advisory or unbound one waits: status stays queued until that session is running a turn
 ```
 
 The delivery lands in the first turn of that session still running when the pump ticks
@@ -287,7 +328,7 @@ tools/relink.mjs         repairs relative imports after a layout move
 ## Tests
 
 ```sh
-npm test          # 13 suites: protocol, CLI, migration, receiver, MCP contract, adapters, faults
+npm test          # 14 suites: protocol, CLI, migration, receiver, MCP contract, adapters, faults
 npm run test:live # against a real DSH harness + real model (needs DSH installed)
 npm run mcp       # start the MCP server by hand to inspect the roster
 ```
