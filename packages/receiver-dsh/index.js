@@ -359,7 +359,13 @@ export function apply(ctx, config = {}) {
 	// are recorded once instead of once per tick, so a trace left on for a day stays
 	// readable. File size limits and rotation belong to the release phase, not here.
 	if (typeof config.debugLog === "string" && config.debugLog.trim()) DEBUG_PATH = config.debugLog.trim();
-	diagnose(`apply: root=${root} endpointId=${endpointId} protocol=${protocolVersion} autoWake=${autoWake} agentsInjected=${ctx.agents !== undefined}`);
+	// The mount line names the capabilities, not just the wiring.
+	//
+	// This exists because "is the running process actually the code I just changed?" was unanswerable
+	// from the trace: an old receiver and a wake-capable one both mounted with the same text, so a
+	// stale deployment looked identical to a bug. `currentSessionControl` is the flag that decides
+	// whether an idle bound session can be woken, so it is the flag worth reporting.
+	diagnose(`apply: root=${root} endpointId=${endpointId} protocol=${protocolVersion} autoWake=${autoWake} currentSessionControl=${allowWake} watchMs=${watchIntervalMs(config)} agentsInjected=${ctx.agents !== undefined}`);
 	if (protocolVersion === "v1" && !mailboxV1?.isBridgeRoot(root)) {
 		ctx.logger?.warn?.(`[harnessmux] no v1 mailbox at ${root} yet — run \`harnessmux init --root "${root}"\` (the tool will also create it on action=init)`);
 	}
@@ -951,7 +957,8 @@ export function apply(ctx, config = {}) {
 		}
 		if (typeof agent.followup !== "function") throw new Error("this session's agent cannot be woken (no followup)");
 		// `followup()` wakes an idle driver and opens a turn boundary; `inject()` deliberately does
-		// not, which is why the waking call is this one.
+		// not, which is why the waking call is this one. It is synchronous by contract, so a throw
+		// here rejects the wake and the delivery is released instead of being acked.
 		agent.followup(makeUserMessage(text));
 		return agent;
 	}

@@ -12,6 +12,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,8 @@ import * as core from "../packages/core/core-v2.mjs";
 
 const HERE = new URL(".", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, "$1");
 const PLUGIN = pathToFileURL(join(HERE, "..", "packages", "receiver-dsh", "index.js")).href;
+/** The client's own pickup hook, run as the client runs it. */
+const HOOK = join(HERE, "..", "packages", "adapter-codex", "scripts", "pending.mjs");
 
 /** The watch interval the plugin uses; the tests wait a little longer than one tick. */
 const TICK_MS = 10_000;
@@ -335,12 +338,84 @@ function seedDelivery(root, input) {
 	}
 }
 
-// --- 8. the plugin file itself stays tied to the documented contract -------------
+// --- 8. the whole loop, without a human ------------------------------------------
+// The point of the feature is a round trip nobody has to push along, so it is asserted as one:
+// the receiver wakes an idle bound session, the session's answer is addressed to the asker, and the
+// client's own pickup hook surfaces it — the same hook Codex runs on SessionStart/UserPromptSubmit.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-loop-"));
+	const codexHome = mkdtempSync(join(tmpdir(), "hxmux-csc-loop-home-"));
+	core.ensureBridge(root, { remember: false });
+	const sessionId = "session-csc-loop";
+	const marker = "LOOP_MARKER_1";
+	core.registerEndpoint(root, { actor: "codex", endpointId: "codex-endpoint", transport: "mcp-stdio", sessions: ["session-cx"], remember: false });
+	core.registerEndpoint(root, { actor: "dsh", endpointId: "dsh-endpoint", transport: "in-process", sessions: [sessionId], remember: false });
+
+	// The waking agent answers exactly the way the receiver's `reply` does, so the assertion covers
+	// the real shape of an answer rather than a hand-built one.
+	let answered = null;
+	// Declared before the plugin is mounted: the pump runs from the first tick, and a callback that
+	// references this binding would otherwise hit the temporal dead zone and fail inside a promise
+	// chain — which looks like "the session was not woken" rather than like a test bug.
+	const instructions = core.postMessage(root, { from: "codex", topic: "loop", kind: "instruction", body: "check the receiver" });
+	const agent = {
+		status: "idle",
+		steer: () => {},
+		session: { header: { id: sessionId } },
+		followup: () => {
+			// What the receiver's `reply` does, expressed through the core so the answer has the real
+			// shape rather than a hand-built one.
+			answered = core.postMessage(root, {
+				from: "dsh",
+				topic: "loop",
+				threadId: instructions.threadId,
+				kind: "report",
+				replyTo: instructions.messageId,
+				body: `${marker} — the session woke itself and answered.`
+			});
+			core.enqueueDelivery(root, { messageId: answered.messageId, target: { actor: "codex" } });
+		}
+	};
+	const mock = mockContext(agent);
+	plugin.apply(mock.ctx, { bridgeRoot: root, protocolVersion: "v2", endpointId: "dsh-endpoint", debugLog: join(root, "trace.log") });
+	try {
+		core.bindThread(root, { threadId: instructions.threadId, endpointId: "dsh-endpoint", sessionId, mode: "delegated" });
+		const delivery = core.enqueueDelivery(root, { messageId: instructions.messageId, actor: "dsh", endpointId: "dsh-endpoint", sessionId, mode: "delegated" });
+
+		await mock.tick();
+
+		// The waking agent's `followup` is the answer itself, so the wake is proven by the answer
+		// existing — checking an array it does not push to would assert the wrong thing.
+		assert.notEqual(answered, null, "nobody touched the harness: the idle session was woken");
+		assert.equal(core.getDelivery(root, delivery.deliveryId).state, "acked", "the instruction is acked");
+		assert.notEqual(answered, null, "the session answered on the thread");
+
+		const hook = execFileSync(process.execPath, [HOOK, "--actor", "codex"], {
+			encoding: "utf8",
+			env: { ...process.env, HARNESSMUX_DIR: root, CODEX_HOME: codexHome }
+		});
+		assert.match(hook, new RegExp(marker, "u"), "the client's pickup hook surfaces the answer");
+		assert.match(hook, new RegExp(instructions.threadId, "u"), "and names the thread to answer on");
+		assert.equal(hook.trim() === "", false, "a waiting answer produces context, not silence");
+
+		// Discovery is not consumption: the answer is still there for the tools to read.
+		const stillQueued = core.listDeliveries(root, "queued").filter((entry) => entry.messageId === answered.messageId);
+		assert.equal(stillQueued.length, 1, "reading via the hook does not consume the answer");
+		assert.equal(core.verifyInvariants(root).ok, true, "and the bridge invariants hold after a full loop");
+	} finally {
+		mock.dispose();
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+		rmSync(codexHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 9. the plugin file itself stays tied to the documented contract -------------
 {
 	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
 	assert.match(source, /resumeSessionId/u, "the wake path uses resume's own option name");
 	assert.equal(source.includes("handle.dispose()"), false, "and never disposes the handle it holds, because that would delete the user's session");
 	assert.match(source, /target: \{ actor: peer \}/u, "the reply addresses the peer by actor rather than trusting the binding");
+	assert.match(source, /currentSessionControl=\$\{allowWake\}/u, "the mount line reports the capability, so a stale deployment is distinguishable from a bug");
 	assert.equal(existsSync(join(HERE, "..", "packages", "receiver-dsh", "index.js")), true, "the receiver exists where the tests expect it");
 }
 
