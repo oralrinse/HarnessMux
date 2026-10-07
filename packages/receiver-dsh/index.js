@@ -263,7 +263,7 @@ const PARAMETER_SPEC = {
 	action: {
 		type: "string",
 		required: true,
-		enum: ["read", "send", "reply", "list", "get", "status", "done", "init"],
+		enum: ["read", "send", "reply", "list", "get", "status", "create", "done", "init"],
 		description: "Mailbox operation. read consumes unread messages addressed to you; send posts a new message; reply answers one message on its thread; list/get/status inspect without consuming; done consumes one message by id; init creates a missing mailbox tree."
 	},
 	body: { type: "string", description: "Message body in markdown. Required for send and reply." },
@@ -539,6 +539,19 @@ export function apply(ctx, config = {}) {
 	 * @param {object} exec - tool execution metadata.
 	 * @returns {{text: string}} the tool value.
 	 */
+	/**
+	 * Provider/model for a session this plugin creates.
+	 *
+	 * Defaults match what the host already uses for its own sessions; a profile row can override both.
+	 * Kept in one place so `create` and any future creation path cannot drift.
+	 *
+	 * @returns {{provider: string, model: string}} the route for a new agent.
+	 */
+	function agentOptionsFromConfig() {
+		const provider = typeof config.provider === "string" && config.provider.trim() ? config.provider.trim() : "deepseek";
+		const model = typeof config.model === "string" && config.model.trim() ? config.model.trim() : "deepseek-chat";
+		return { provider, model };
+	}
 	function toolV2(action, args, exec) {
 		const sessionId = sessionOf(exec);
 		switch (action) {
@@ -575,6 +588,43 @@ export function apply(ctx, config = {}) {
 				const message = mailboxV2.getMessage(root, String(args.id));
 				if (!message) return value(`no v2 message ${args.id}`);
 				return value(args?.json === true ? JSON.stringify(message, null, 2) : `${message.body}\n\nfrom=${message.from} thread=${message.threadId} kind=${message.kind}`);
+			}
+			case "create": {
+				// Mint a real, persisted DSH session under an id this bridge controls, and publish it so
+				// it is immediately addressable by `bind_thread`.
+				//
+				// `ctx.agents.create({ sessionId })` is the host's own agent factory: first use creates the
+				// session, a later remount resumes the materialized history. It is used instead of
+				// shelling out to `dsh --profile headless` because that spawns a *separate* host process
+				// whose session this receiver never owns, so it could never be handed a delivery.
+				if (typeof ctx.agents?.create !== "function") {
+					return value("mailbox create is unavailable: this host mounted no agent factory (ctx.agents.create)");
+				}
+				const requested = typeof args?.id === "string" && args.id.trim() !== "" ? args.id.trim() : `session-${randomUUID()}`;
+				return ctx.agents
+					.create({ sessionId: requested, agentOptions: agentOptionsFromConfig() })
+					.then((handle) => {
+						const created = handle?.agent?.session?.header?.id ?? requested;
+						// Publish immediately: the watcher would do it on its next tick, but the caller is
+						// about to bind to this id and must not race it.
+						refreshEndpointIfChanged();
+						const record = {
+							sessionId: created,
+							endpointId,
+							requestedId: requested,
+							status: handle?.agent?.status ?? "unknown",
+							persistent: true,
+							addressable: (mailboxV2.getEndpoint(root, endpointId)?.sessions ?? []).includes(created),
+							resumable: true,
+							uiVisible: "not-verified"
+						};
+						// `persistent`/`resumable` are asserted from what the host accepted, `addressable` is
+						// read back from the published endpoint, and UI visibility is deliberately NOT inferred
+						// from the existence of a store or projection row: it is reported as not-verified
+						// until someone looks at the harness UI.
+						return value(`created ${created}\n${JSON.stringify(record, null, 2)}`);
+					})
+					.catch((error) => value(`mailbox create failed: ${String(error?.message ?? error)}`));
 			}
 			case "send": {
 				const body = typeof args?.body === "string" ? args.body.trim() : "";
