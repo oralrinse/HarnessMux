@@ -43,7 +43,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node tests/mailbox.test.mjs && node tests/protocol-v2.test.mjs && node tests/cli-v2.test.mjs && node tests/migrate.test.mjs && node tests/manifest.test.mjs && node tests/plugin.test.mjs && node tests/plugin-v2.test.mjs && node tests/mcp-contract.test.mjs && node tests/adapter-codex.test.mjs && node tests/adapter-claude.test.mjs && node tests/endpoint-freshness.test.mjs && node tests/trace-policy.test.mjs && node tests/current-session.test.mjs && node tests/commander.test.mjs && node examples/live/cutover-faults.test.mjs",
+    "test": "node tests/mailbox.test.mjs && node tests/protocol-v2.test.mjs && node tests/cli-v2.test.mjs && node tests/migrate.test.mjs && node tests/manifest.test.mjs && node tests/plugin.test.mjs && node tests/plugin-v2.test.mjs && node tests/mcp-contract.test.mjs && node tests/adapter-codex.test.mjs && node tests/adapter-claude.test.mjs && node tests/endpoint-freshness.test.mjs && node tests/trace-policy.test.mjs && node tests/current-session.test.mjs && node tests/commander.test.mjs && node tests/mapping.test.mjs && node examples/live/cutover-faults.test.mjs",
     "test:live": "node examples/live/cutover-probe.mjs",
     "test:probes": "node examples/live/acp-live-probe.mjs && node examples/live/acp-wake-probe.mjs",
     "mcp": "node packages/mcp/server.mjs",

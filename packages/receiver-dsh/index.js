@@ -188,6 +188,8 @@ const CORE_V1_URL = pathToFileURL(join(REPO_ROOT, "packages", "core", "core.mjs"
 
 /** The v2 core (messages + deliveries). */
 const CORE_V2_URL = pathToFileURL(join(REPO_ROOT, "packages", "core", "core-v2.mjs")).href;
+const EXECUTION_URL = pathToFileURL(join(REPO_ROOT, "packages", "core", "execution.mjs")).href;
+const FINAL_CAPTURE_URL = pathToFileURL(join(REPO_ROOT, "packages", "core", "final-capture.mjs")).href;
 
 /** File that remembers the user's chosen bridge root. */
 const ROOT_CACHE = join(homedir(), ".dsh", "harnessmux-root.txt");
@@ -195,6 +197,25 @@ const ROOT_CACHE = join(homedir(), ".dsh", "harnessmux-root.txt");
 /** Loaded mailbox APIs (filled by the dynamic imports below). */
 let mailboxV1 = null;
 let mailboxV2 = null;
+
+/**
+ * Workflow-layer modules: delivery↔turn correlation, and final-text accumulation.
+ *
+ * Kept apart from `mailboxV2` on purpose. Neither of these is protocol state — nothing here is read by
+ * the pump's claim path, the lease, the ack, or the invariant check — so a bug in the workflow layer
+ * cannot corrupt delivery semantics. That separation is what keeps automatic final capture a feature
+ * of the bridge rather than a change to it.
+ */
+let executionV2 = null;
+let finalCapture = null;
+
+/**
+ * Open accumulators, keyed by `<sessionId>::<attemptId>`.
+ *
+ * Bounded by one entry per in-flight attempt; cleared when the attempt's execution is completed or
+ * fails, so a long-running receiver does not accumulate one object per turn it has ever seen.
+ */
+const OPEN_ACCUMULATORS = new Map();
 
 /**
  * Resolve the bridge root for this plugin instance.
@@ -246,6 +267,8 @@ import("@deepseek-ai/dsh-llm")
 // The mailbox libraries are local and always present next to this plugin.
 mailboxV1 = await import(CORE_V1_URL);
 mailboxV2 = await import(CORE_V2_URL);
+executionV2 = await import(EXECUTION_URL);
+finalCapture = await import(FINAL_CAPTURE_URL);
 
 /**
  * The bridge briefing injected at session start.
@@ -1017,6 +1040,11 @@ export function apply(ctx, config = {}) {
 				continue;
 			}
 			try {
+				// Persist the correlation *before* touching the host. If this process dies between the
+				// hand-off and the turn, the record says "work was dispatched for this delivery and its turn
+				// was never seen" — an answerable question. Recording afterwards would leave a completed
+				// turn that nothing can be traced back to.
+				beginDispatchRecord(delivery, claim, message, binding, "steer", sessionId);
 				agent.steer(makeUserMessage(deliveryText(delivery, claim, message)));
 				// Crash-injection hook: a file at this path simulates the process dying
 				// exactly between a successful steer and the ack that would follow it.
@@ -1108,16 +1136,21 @@ export function apply(ctx, config = {}) {
 			return;
 		}
 		const text = deliveryText(delivery, claim, message);
+		// Same ordering rule as the steer path: the correlation is durable before the host is touched, so
+		// a crash cannot leave a completed turn that nothing points back to.
+		const begun = beginDispatchRecord(delivery, claim, message, binding, "followup", targetSessionId);
 		wakeAgent(targetSessionId, text)
 			.then((agent) => {
 				// The host accepted the delivery: this is what ACK has always meant here. It is not
 				// "the task is done", and it is not written until the turn actually opened.
+				if (begun !== null) markExecutionRunning(root, begun.executionId);
 				recordDispatchFor(delivery, claim, message, binding, "woken", targetSessionId, agent);
 				mailboxV2.ackDelivery(root, delivery.deliveryId, { owner, note: "woken" });
 				retryAfter.delete(backoffKey(delivery.deliveryId));
 				diagnose(`pump: woke ${targetSessionId} for ${delivery.deliveryId} attempt=${claim.claim.attempt}`);
 			})
 			.catch((error) => {
+				if (begun !== null) markExecutionFailed(root, begun.executionId, error);
 				mailboxV2.releaseDelivery(root, delivery.deliveryId, { reason: "wake-failed" });
 				const waitMs = Math.min(RETRY_BASE_MS * Math.max(1, claim.claim.attempt), RETRY_MAX_MS);
 				retryAfter.set(backoffKey(delivery.deliveryId), Date.now() + waitMs);
@@ -1277,6 +1310,134 @@ export function apply(ctx, config = {}) {
 		}
 	}
 
+	/**
+	 * Write the correlation record for a delivery that is about to be handed to the host.
+	 *
+	 * Must be called *before* `steer`/`followup`. Returns null rather than throwing when the workflow
+	 * layer is unavailable, because correlation is valuable but never a reason to refuse to deliver work.
+	 *
+	 * @param {object} delivery - the delivery row.
+	 * @param {object} claim - the claim.
+	 * @param {object} message - the immutable message.
+	 * @param {object|null} binding - the thread binding, when there is one.
+	 * @param {"steer"|"followup"} kind - which hand-off is about to happen.
+	 * @param {string} targetSessionId - the session being driven.
+	 * @returns {object|null} the persisted record, or null.
+	 */
+	function beginDispatchRecord(delivery, claim, message, binding, kind, targetSessionId) {
+		try {
+			if (executionV2 === null) return null;
+			return executionV2.beginExecution(root, {
+				deliveryId: delivery.deliveryId,
+				originMessageId: delivery.messageId,
+				threadId: message?.threadId ?? "",
+				originActor: message?.from ?? "",
+				endpointId,
+				sessionId: targetSessionId,
+				dispatchKind: kind
+			});
+		} catch (error) {
+			ctx.logger?.warn?.(`[harnessmux] could not record the execution for ${delivery.deliveryId}: ${String(error)}`);
+			return null;
+		}
+	}
+
+	/** Mark a recorded execution as accepted by the host. @param {string} executionId - the record. */
+	function markExecutionRunning(executionId) {
+		try {
+			executionV2?.markRunning(root, executionId);
+		} catch {
+			// Correlation is best-effort; never break a delivery over it.
+		}
+	}
+
+	/**
+	 * Mark a recorded execution as failed to dispatch, so it is never mistaken for live work.
+	 *
+	 * @param {string} executionId - the record.
+	 * @param {unknown} error - the failure.
+	 */
+	function markExecutionFailed(executionId, error) {
+		try {
+			executionV2?.markDispatchFailed(root, executionId, String(error?.message ?? error));
+		} catch {
+			// As above.
+		}
+	}
+
+	/**
+	 * Apply one assistant-stream frame to the attempt it belongs to.
+	 *
+	 * The attempt id comes from the frame itself. It is never parsed to decide *which* execution a frame
+	 * belongs to: the session is matched against outstanding executions, and the attempt id is recorded
+	 * once seen. Parsing the `:<n>` suffix would make the binding depend on the shape of a string.
+	 *
+	 * @param {{frame?: object, agent?: object}} payload - the host event payload.
+	 */
+	function captureAssistantFrame(payload) {
+		try {
+			if (finalCapture === null || executionV2 === null) return;
+			const frame = payload?.frame;
+			if (frame === null || typeof frame !== "object") return;
+			const sessionId = sessionIdOfAgent(payload?.agent);
+			const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : "";
+			if (sessionId === "" || attemptId === "") return;
+
+			const key = finalCapture.attemptKey(sessionId, attemptId);
+			let record = OPEN_ACCUMULATORS.get(key);
+			if (record === undefined) {
+				// Only start tracking an attempt that some open execution is actually waiting for. An
+				// unrelated turn in the same session must not be captured — the mistake made during
+				// reconnaissance was treating a pre-existing turn's frames as the new task's.
+				const open = executionV2.outstandingExecution(root, sessionId);
+				if (open === null) return;
+				if (open.attemptId === null) {
+					executionV2.attachAttempt(root, open.executionId, { attemptId, turn: finalCapture.turnFromAttemptId(attemptId) });
+					diagnose(`capture: bound execution ${open.executionId} to attempt ${attemptId}`);
+				} else if (open.attemptId !== attemptId) {
+					// A different attempt for the same session while one is outstanding: the commander loop
+					// allows one round at a time, so this is reported rather than guessed at.
+					diagnoseOnChange(`attempt-conflict:${sessionId}`, attemptId, `capture: session ${sessionId} produced attempt ${attemptId} while ${open.attemptId} is outstanding; not binding`);
+					return;
+				}
+				record = finalCapture.createAccumulator({ sessionId, attemptId });
+				OPEN_ACCUMULATORS.set(key, record);
+			}
+			finalCapture.accumulateFrame(record, frame);
+
+			// A finished attempt closes its execution. The record keeps the text and the anchor; sending an
+			// answer is a later, separate step.
+			if (frame.type === "end") {
+				const open = executionV2.executionForAttempt(root, attemptId);
+				if (open !== null && open.state !== "turn_completed" && open.state !== "replied") {
+					const verdict = finalCapture.completionOf(record);
+					executionV2.completeExecution(root, open.executionId, {
+						finalText: finalCapture.finalTextOf(record),
+						reason: record.reason,
+						assistantMessageSeq: record.assistantMessageSeq
+					});
+					diagnose(
+						`capture: attempt ${attemptId} finished reason=${verdict.reason} text=${finalCapture.finalTextOf(record).length}chars execution=${open.executionId}`
+					);
+				}
+				OPEN_ACCUMULATORS.delete(key);
+			}
+		} catch (error) {
+			ctx.logger?.warn?.(`[harnessmux] final capture failed: ${String(error)}`);
+		}
+	}
+
+	/**
+	 * The session id behind an agent, when the host exposes one.
+	 *
+	 * @param {object} agent - a host agent.
+	 * @returns {string} the session id, or an empty string.
+	 */
+	function sessionIdOfAgent(agent) {
+		const id = agent?.session?.header?.id;
+		return typeof id === "string" ? id : "";
+	}
+
 	ctx.on("agent/created", async ({ agent }) => {
 		try {
 			agent.inject(makeUserMessage(briefing(root, actor, peer)));
@@ -1284,4 +1445,9 @@ export function apply(ctx, config = {}) {
 			ctx.logger?.warn?.(`[harnessmux] could not inject the briefing: ${String(error)}`);
 		}
 	});
+
+	// The content half of final capture. The subscription is unconditional and cheap: a frame is ignored
+	// unless an open execution is waiting on the attempt it belongs to, so a session nobody delegated to
+	// costs one map lookup per frame and stores nothing.
+	ctx.on("agent/assistant-stream", captureAssistantFrame);
 }
