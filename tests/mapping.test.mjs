@@ -474,4 +474,29 @@ withRoot((root) => {
 	assert.equal(/header\.cwd\s*=/u.test(source), false, "nor patch a session header's working directory");
 }
 
+// --- M18. where the preset/composition step lives, as far as it was traced ----
+// Read-only reconnaissance, recorded so the next pass starts where this one stopped.
+//
+// Established:
+//   * a real persisted session header carries `cwd`, `isSeeded`, `delegationDepth` and
+//     `agentPreset:"standard"`; a session from `ctx.agents.create({ agentPreset })` gets none of them —
+//     the option is accepted and dropped, header still `{version,id,createdAt,isSeeded}`;
+//   * `dsh-agent-preset` is a registrar, not a resolver: it registers a named list of child plugins into
+//     the injected `agentPresets` service, and its own docs say "`config.id` is the preset identity saved
+//     by sessions";
+//   * `agentPresets` is **not registered in the headless profile** — injecting it fails the plugin
+//     silently — so the `standard` preset comes from a bundle layer that a headless host does not load;
+//   * the desktop profile's patch holds an `agent-default-model` row with `provider` and `model`, which
+//     is where a working agent's route comes from, while neither `<profile>/cordis.yml` (an empty list) nor
+//     the patch mentions a preset row at all.
+//
+// Not established: which bundle registers `standard`, which function expands a preset into sections and
+// tools, which builder writes the real session header, and whether a plugin can reach that path.
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	// The receiver must not try to stand in for the preset/composition layer.
+	assert.equal(/agentPresets/u.test(source), false, "the receiver does not reach for the preset registry");
+	assert.equal(/require(Factory|Initiator)\(/u.test(source), false, "nor drive the agent factory directly");
+}
+
 console.log("mapping.test.mjs: all assertions passed");
