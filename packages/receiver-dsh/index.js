@@ -608,9 +608,27 @@ export function apply(ctx, config = {}) {
 	 * @returns {{provider: string, model: string}} the route for a new agent.
 	 */
 	function agentOptionsFromConfig() {
-		const provider = typeof config.provider === "string" && config.provider.trim() ? config.provider.trim() : "deepseek";
-		const model = typeof config.model === "string" && config.model.trim() ? config.model.trim() : "deepseek-chat";
-		return { provider, model };
+		// Never invented. A session created with no route cannot even assemble its first prompt — measured on
+		// a real host, its turn dies at `turn/start` with `prompt variable "{{model}}" has no value for this
+		// assembly` — so a placeholder is worse than nothing: it looks like configuration while producing a
+		// session that can never run. The live session's own route is inherited instead, because that is by
+		// definition a route this host can actually dispatch to. An explicit `provider`/`model` on the plugin
+		// row still wins, for a host that wants created sessions pinned elsewhere.
+		const configured = {
+			...(typeof config.provider === "string" && config.provider.trim() ? { provider: config.provider.trim() } : {}),
+			...(typeof config.model === "string" && config.model.trim() ? { model: config.model.trim() } : {})
+		};
+		if (configured.provider !== undefined && configured.model !== undefined) return configured;
+		let live = null;
+		try {
+			live = (ctx.agents?.roots?.() ?? []).find((candidate) => candidate?.options?.provider && candidate?.options?.model) ?? null;
+		} catch {
+			live = null;
+		}
+		return {
+			provider: configured.provider ?? live?.options?.provider,
+			model: configured.model ?? live?.options?.model
+		};
 	}
 	async function toolV2(action, args, exec) {
 		const sessionId = sessionOf(exec);

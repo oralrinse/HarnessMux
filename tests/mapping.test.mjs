@@ -409,4 +409,25 @@ withRoot((root) => {
 	assert.match(source, /bindHostIdentity\(root, open\.executionId, \{ attemptId \}\)/u, "the attempt id alone is recorded");
 }
 
+// --- M15. a created session is never given an invented model route ------------
+// Measured on a real host: a session created without a route dies at `turn/start` with
+// `prompt variable "{{model}}" has no value for this assembly`, so its turn never produces an
+// assistant/message and nothing can be captured. A hardcoded default looked like configuration while
+// producing a session that could never run. The route must be inherited from a live session.
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	assert.equal(
+		/"deepseek-chat"/u.test(source),
+		false,
+		"no model name is invented in the receiver"
+	);
+	assert.equal(
+		/provider = .*: "deepseek"/u.test(source),
+		false,
+		"and no provider is defaulted to a guess"
+	);
+	assert.match(source, /live\?\.options\?\.provider/u, "the live session's provider is inherited instead");
+	assert.match(source, /live\?\.options\?\.model/u, "and its model");
+}
+
 console.log("mapping.test.mjs: all assertions passed");
