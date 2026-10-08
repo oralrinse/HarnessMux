@@ -500,4 +500,28 @@ withRoot((root) => {
 	assert.equal(/require(Factory|Initiator)\(/u.test(source), false, "nor drive the agent factory directly");
 }
 
+// --- M19. what a real working session proved about the capture path -----------
+// Two runs against the host's own session — built by the normal CLI path, so `cwd`, `agentPreset` and a
+// resolved route are all present. Recorded because these are the first live results where an execution
+// reached `turn_completed` at all.
+//
+//   capture: frame …:1 has no dispatched agent and no bound execution; ignored rather than guessed
+//   capture: bound execution … to host attempt …:2
+//   capture: attempt …:2 finished reason=tool-calls text=0chars
+//
+// so identity attribution works on a real session: the attempt that was not dispatched to is refused, and
+// the one that was is bound. The empty text is explained by the reason rather than by a capture failure —
+// a turn that ends in `tool-calls` has not produced its visible answer yet, so the answer lands in a later
+// turn. The first run additionally showed why the scenario must wait for idle: a delivery arriving while
+// the boot turn is still running is steered into *that* turn, and the captured attempt is then the boot
+// task rather than the delivered one.
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	// A turn that ended by calling a tool must not be reported as a finished answer.
+	assert.match(source, /completionOf/u, "completion is judged by the host's own reason, not by reaching an end frame");
+	const captureSource = readFileSync(join(HERE, "..", "packages", "core", "final-capture.mjs"), "utf8");
+	assert.match(captureSource, /kind === "completed"/u, "and only a completed reason counts as complete");
+	assert.match(captureSource, /hasText/u, "with text presence reported separately, so 'completed but empty' stays visible");
+}
+
 console.log("mapping.test.mjs: all assertions passed");
