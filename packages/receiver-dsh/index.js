@@ -1408,23 +1408,6 @@ export function apply(ctx, config = {}) {
 	 *
 	 * @param {{frame?: object, agent?: object}} payload - the host event payload.
 	 */
-	/**
-	 * Recover the session id from a host attempt id.
-	 *
-	 * Attempt ids are shaped `session-<uuid>:<turn>`. This is used only to find the open execution a frame
-	 * could belong to; the execution's own recorded `sessionId`/`attemptId` are authoritative once bound,
-	 * and a mismatch is refused rather than trusted.
-	 *
-	 * @param {string} attemptId - the host's attempt id.
-	 * @returns {string} the session id, or an empty string when the shape is unexpected.
-	 */
-	function sessionIdFromAttemptId(attemptId) {
-		const text = String(attemptId ?? "");
-		const cut = text.lastIndexOf(":");
-		if (cut <= 0) return "";
-		return text.slice(0, cut);
-	}
-
 	function captureAssistantFrame(payload) {
 		try {
 			if (finalCapture === null || executionV2 === null) return;
@@ -1477,10 +1460,13 @@ export function apply(ctx, config = {}) {
 				// host's own session id becomes knowable, so it is frozen onto the record here — the delivery
 				// keeps its HarnessMux address, and the host identity is recorded beside it.
 				if (open.attemptId === null) {
-					executionV2.bindHostIdentity(root, open.executionId, {
-						hostSessionId: sessionIdFromAttemptId(attemptId),
-						attemptId
-					});
+					// Only the attempt id is recorded. Its leading segment is deliberately NOT taken as the
+					// session: measured on a real host, an attempt opened on one session carries the *boot*
+					// session's id as its prefix (`framePrefixMatchesCreated=false, framePrefixMatchesBoot=true`),
+					// so deriving a session from it would record a wrong one and make every later lookup wrong
+					// with it. The delivery address is already in `targetSessionId`; a host-side session id is
+					// only recorded when something authoritative provides one.
+					executionV2.bindHostIdentity(root, open.executionId, { attemptId });
 					diagnose(`capture: bound execution ${open.executionId} to host attempt ${attemptId}`);
 				}
 				record = finalCapture.createAccumulator({ sessionId, attemptId });

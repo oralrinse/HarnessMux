@@ -387,4 +387,26 @@ withRoot((root) => {
 	}
 }
 
+// --- M14. an attempt id is not a session id -----------------------------------
+// Measured on a real host: a turn opened on the session `session-sim-align` produced frames whose
+// attempt id was `session-<the boot session's uuid>:1`. The leading segment of an attempt id therefore
+// does **not** name the session the turn belongs to — the host appears to stamp its own id. Any code
+// that derives a session from that prefix records a wrong session and then makes every later lookup wrong
+// with it, silently.
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	assert.equal(
+		/sessionIdFromAttemptId/u.test(source),
+		false,
+		"the receiver does not derive a session from an attempt id prefix"
+	);
+	assert.equal(
+		/hostSessionId: sessionIdFromAttemptId/u.test(source),
+		false,
+		"and never stores one as the host session"
+	);
+	// The attempt id itself is still recorded — it is a real host key, just not a session name.
+	assert.match(source, /bindHostIdentity\(root, open\.executionId, \{ attemptId \}\)/u, "the attempt id alone is recorded");
+}
+
 console.log("mapping.test.mjs: all assertions passed");
