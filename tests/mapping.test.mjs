@@ -430,4 +430,23 @@ withRoot((root) => {
 	assert.match(source, /live\?\.options\?\.model/u, "and its model");
 }
 
+// --- M16. the created-session assembly gap is a known, recorded limitation ----
+// Measured on a real host, a session from `ctx.agents.create()` is a complete session but not yet an
+// assembled agent: it has `systemPrompt` like any other, yet its first step fails with
+//
+//   prompt variable "{{model}}" has no value for this assembly (section "deployment:persona-prefix")
+//
+// because the values the assembly needs live on the agent (`options.provider`, `options.model`) and the
+// session header (`cwd`), and the create path leaves all three empty. Passing `cwd` as a create option
+// was measured and does not populate the header either, so this is not fixed by supplying more
+// arguments. `agentOptionsFromConfig` inherits what it can; the rest is an open product question, and
+// this test exists so the gap cannot be mistaken for working capture later.
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	// The receiver must not pretend the problem away by inventing the missing values.
+	assert.equal(/"deepseek-chat"/u.test(source), false, "no model is invented to satisfy the assembly");
+	assert.equal(/cwd:\s*"[A-Za-z]:/u.test(source), false, "and no working directory is invented either");
+	assert.match(source, /live\?\.options\?\.provider/u, "only a value the host already resolved is reused");
+}
+
 console.log("mapping.test.mjs: all assertions passed");
