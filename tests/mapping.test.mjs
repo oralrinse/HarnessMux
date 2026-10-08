@@ -449,4 +449,29 @@ withRoot((root) => {
 	assert.match(source, /live\?\.options\?\.provider/u, "only a value the host already resolved is reused");
 }
 
+// --- M17. the materialize path a created session misses ----------------------
+// A working session's own persisted header is:
+//
+//   {"version":4,"id":"session-…","createdAt":…,
+//    "cwd":"<workspace>","isSeeded":false,"delegationDepth":0,"agentPreset":"standard"}
+//
+// while a session from `ctx.agents.create()` carries only `{version,id,createdAt,isSeeded}`. The missing
+// pair is exactly what the assembly needs: `cwd` is a prompt variable, and `agentPreset` selects the
+// composition.
+//
+// The host documents the mechanism in two packages:
+//   dsh-agent-preset          "Declare several presets and let sessions select one. `config.id` is the
+//                             preset identity saved by sessions."
+//   dsh-agent-preset-registry "`default` | required | Preset ID used when none is requested"
+//
+// So the missing step is preset resolution plus workspace context, performed by whoever builds a session
+// definition — not by `create()`, and not by passing `cwd` to it (measured: it does not reach the header).
+// This test records the shape of the gap so a later "just set the field" patch has to argue with it.
+{
+	// Nothing in the receiver may fabricate the header fields that make a session assembled.
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	assert.equal(/agentPreset\s*:/u.test(source), false, "the receiver does not write an agent preset into a session itself");
+	assert.equal(/header\.cwd\s*=/u.test(source), false, "nor patch a session header's working directory");
+}
+
 console.log("mapping.test.mjs: all assertions passed");
