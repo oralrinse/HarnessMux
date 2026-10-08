@@ -335,6 +335,10 @@ const PARAMETER_SPEC = {
 		type: "number",
 		description: "For wait: how long to wait before returning status=timeout. A timeout is not a failure and must never cause a resend."
 	},
+	allow_unconfigured: {
+		type: "boolean",
+		description: "For create: acknowledge that this host cannot produce a fully assembled session, and that the session created will be a primitive that cannot run a turn. Refused by default."
+	},
 	clientRequestId: {
 		type: "string",
 		description: "For send: your own id for this submission. Sending the same id again returns the original message instead of creating a duplicate task. Use it for anything you might retry — a pending delivery is not a failed one."
@@ -720,6 +724,31 @@ export function apply(ctx, config = {}) {
 				// whose session this receiver never owns, so it could never be handed a delivery.
 				if (typeof ctx.agents?.create !== "function") {
 					return value("mailbox create is unavailable: this host mounted no agent factory (ctx.agents.create)");
+				}
+				// Fail closed. A session from `ctx.agents.create()` is a complete *session* but not an
+				// assembled *agent*: measured on a real host its header lacks `cwd`, `agentPreset` and
+				// `delegationDepth`, its `options` is empty, and its first step dies in prompt assembly with
+				// `prompt variable "{{model}}" has no value`. Passing those fields to `create()` was measured
+				// and they are dropped, and the `agentPresets` service that would resolve them is not
+				// registered in every profile.
+				//
+				// Producing one anyway would be worse than refusing: a session that looks bound and healthy
+				// while being unable to run is exactly the failure that is hardest to diagnose from outside.
+				// So the action refuses unless the caller explicitly accepts a primitive-only session.
+				if (args?.allow_unconfigured !== true) {
+					return value(
+						[
+							"configured-session creation unavailable",
+							"",
+							"This host exposes no way for a plugin to create a *workspace-backed, fully assembled* session.",
+							"`ctx.agents.create()` produces a session primitive: persistent and addressable, but with no",
+							"`cwd`, no `agentPreset` and no resolved provider/model, so its first turn fails in prompt",
+							"assembly. See docs/REPORT-configured-session-creation.md.",
+							"",
+							"Nothing was created. Use an existing session instead: `list_sessions` then `bind_thread`.",
+							"Pass allow_unconfigured=true only to create a primitive deliberately, for inspection."
+						].join("\n")
+					);
 				}
 				const requested = typeof args?.id === "string" && args.id.trim() !== "" ? args.id.trim() : `session-${randomUUID()}`;
 				return ctx.agents

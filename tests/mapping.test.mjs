@@ -494,8 +494,9 @@ withRoot((root) => {
 // tools, which builder writes the real session header, and whether a plugin can reach that path.
 {
 	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
-	// The receiver must not try to stand in for the preset/composition layer.
-	assert.equal(/agentPresets/u.test(source), false, "the receiver does not reach for the preset registry");
+	// The receiver must not try to stand in for the preset/composition layer. The check is on access
+	// syntax rather than the bare word, because the refusal message legitimately names the service.
+	assert.equal(/ctx\.agentPresets|ctx\[.agentPresets.\]/u.test(source), false, "the receiver does not read the preset registry");
 	assert.equal(/require(Factory|Initiator)\(/u.test(source), false, "nor drive the agent factory directly");
 }
 
