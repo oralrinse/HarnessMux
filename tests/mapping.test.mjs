@@ -271,20 +271,17 @@ withRoot((root) => {
 	assert.equal(steerBegin < steerCall, true, "the record is persisted before the host is steered");
 
 	const wakeBegin = source.indexOf('beginDispatchRecord(delivery, claim, message, binding, "followup"');
-	const wakeCall = source.indexOf("wakeAgent(targetSessionId, text)");
+	const wakeCall = source.indexOf("wakeAgent(targetSessionId, text");
 	assert.notEqual(wakeBegin, -1, "the wake path records the mapping");
 	assert.equal(wakeBegin < wakeCall, true, "and persists it before the session is resumed");
 
 	// A failed hand-off must be explained, never left looking live.
 	assert.match(source, /markExecutionFailed/u, "a failed dispatch is recorded as failed");
 	// Frames are captured only for an attempt some execution is actually waiting on, which is what stops
-	// an unrelated or pre-existing turn from being adopted. Resolution prefers identity — an execution
-	// already bound to this attempt, or one whose session the attempt names — and only falls back to
-	// uniqueness when exactly one execution is outstanding. Guessing between several is refused.
-	assert.match(source, /executionForAttempt\(root, attemptId\)/u, "capture resolves by attempt identity first");
-	assert.match(source, /outstandingExecutions\(root\)/u, "and consults how many executions are outstanding");
-	assert.match(source, /outstanding\.length === 1 \? outstanding\[0\] : null/u, "binding by uniqueness only when there is exactly one");
-	assert.match(source, /not binding/u, "and refuses rather than guessing when there are several");
+	// an unrelated or pre-existing turn from being adopted. Resolution is by identity — see M12, which
+	// asserts the absence of the uniqueness inference this used to rely on.
+	assert.match(source, /executionForAttempt\(root, attemptId\)/u, "capture can resolve an execution already bound to the attempt");
+	assert.match(source, /not binding/u, "and refuses rather than guessing on a mismatch");
 	assert.match(source, /ctx\.on\("agent\/assistant-stream", captureAssistantFrame\)/u, "and the stream is subscribed once");
 }
 
@@ -303,6 +300,91 @@ withRoot((root) => {
 		false,
 		"and no discarded followup promise remains"
 	);
+}
+
+// --- M12. a frame is attributed by identity or not at all ---------------------
+// This reproduces a real misbinding. On a live host two sessions produced assistant-stream frames at the
+// same time: the host's own session and the session a delivery was dispatched to. The capture path then
+// resolved the owner by asking "is exactly one execution outstanding? then it must be that one" — and
+// bound the *host's* turn to the delivery. Nothing failed loudly; the record simply held another
+// session's answer.
+//
+// The inference is now gone. Attribution is by the agent object that was handed the delivery, or by an
+// execution already bound to the arriving attempt id. There is no third rule, because a missed frame
+// costs a wait while a misattributed frame costs correctness.
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+
+	// The inference must be absent, in any spelling.
+	assert.equal(
+		/outstanding\.length === 1/u.test(source),
+		false,
+		"there is no 'exactly one outstanding, so it must be this' fallback"
+	);
+	assert.equal(
+		/outstandingExecutions\(root\)/u.test(source),
+		false,
+		"and the outstanding list is not consulted to guess an owner"
+	);
+
+	// Attribution must be anchored on the dispatched agent object.
+	assert.match(source, /DISPATCHED_AGENTS = new WeakMap\(\)/u, "the dispatcher is tracked by object identity");
+	assert.match(source, /DISPATCHED_AGENTS\.get\(payload\?\.agent\)/u, "a frame is attributed from its own agent object");
+	assert.match(source, /const candidate = dispatched \?\? bound;/u, "identity first, then an execution already bound to this attempt");
+	assert.match(source, /ignored rather than guessed/u, "and an unowned frame is ignored and reported");
+
+	// The registration must precede the wake, because the first frame can arrive while followup is pending.
+	const wakeStart = source.indexOf("async function wakeAgent(");
+	assert.notEqual(wakeStart, -1, "the wake path exists");
+	const registration = source.indexOf("DISPATCHED_AGENTS.set(agent, executionId);", wakeStart);
+	const wake = source.indexOf("await agent.followup(makeUserMessage(text));", wakeStart);
+	assert.notEqual(registration, -1, "the wake path registers the agent it will use");
+	assert.notEqual(wake, -1, "and then wakes");
+	assert.equal(registration < wake, true, "registering before the wake, because the first frame can arrive while followup is pending");
+
+	// The two-layer identity is recorded, not conflated.
+	assert.match(source, /bindHostIdentity\(root/u, "the host's own session id is frozen from the first frame");
+	const executionSource = readFileSync(join(HERE, "..", "packages", "core", "execution.mjs"), "utf8");
+	assert.match(executionSource, /targetSessionId: String\(input\.sessionId/u, "while the delivery keeps the address it was given");
+}
+
+// --- M13. the identity rule itself, exercised --------------------------------
+// A deterministic stand-in for the live pair: EA is bound to agent A, B has no execution at all.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-mapping-identity-"));
+	core.ensureBridge(root, { remember: false });
+	try {
+		const ea = execution.beginExecution(root, {
+			deliveryId: "D-A",
+			originMessageId: "M-A",
+			threadId: "T-A",
+			sessionId: "session-A",
+			dispatchKind: "followup"
+		});
+		// Frames from an unrelated agent/attempt must leave EA untouched: this is the misbinding.
+		const unrelated = execution.executionForAttempt(root, "session-B:1");
+		assert.equal(unrelated, null, "an attempt nobody dispatched for resolves to no execution");
+		const untouched = execution.getExecution(root, ea.executionId);
+		assert.equal(untouched.attemptId, null, "so the dispatched execution keeps an empty attempt");
+		assert.equal(untouched.finalText, "", "and no text");
+		assert.equal(untouched.hostSessionId, "", "and no host identity");
+
+		// Only the dispatched attempt binds, and it freezes both identities.
+		const bound = execution.bindHostIdentity(root, ea.executionId, { hostSessionId: "session-<uuid>", attemptId: "session-<uuid>:2" });
+		assert.equal(bound.attemptId, "session-<uuid>:2", "the arriving attempt is recorded");
+		assert.equal(bound.hostSessionId, "session-<uuid>", "and the host's own session id with it");
+		assert.equal(bound.targetSessionId, "session-A", "while the delivered address is preserved");
+		assert.equal(execution.executionForAttempt(root, "session-<uuid>:2")?.deliveryId, "D-A", "and the attempt then resolves to its delivery");
+
+		// A second host session claiming the same execution is refused, not silently accepted.
+		assert.throws(
+			() => execution.bindHostIdentity(root, ea.executionId, { hostSessionId: "session-other", attemptId: "session-other:1" }),
+			/already bound to host session/u,
+			"one delivery cannot belong to two host sessions"
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
 }
 
 console.log("mapping.test.mjs: all assertions passed");

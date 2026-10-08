@@ -134,6 +134,10 @@ export function beginExecution(root, input = {}) {
 		originActor: String(input.originActor ?? ""),
 		// Destination identity.
 		endpointId: String(input.endpointId ?? ""),
+		// The id HarnessMux addresses the delivery with.
+		targetSessionId: String(input.sessionId ?? ""),
+		// The id the host itself uses, learned from the first frame of the attempt it opens.
+		hostSessionId: "",
 		sessionId: String(input.sessionId ?? ""),
 		dispatchKind: input.dispatchKind === "followup" ? "followup" : "steer",
 		// Filled in from host events, never parsed out of a string.
@@ -259,6 +263,38 @@ export function outstandingExecutions(root) {
 		(record) => record.state === "dispatching" || record.state === "running" || record.state === "turn_completed"
 	);
 	return live;
+}
+
+/**
+ * Bind an execution to the host's own session id and attempt id.
+ *
+ * Called once the first frame of the attempt arrives, for an execution whose ownership was already
+ * established by object identity. This is the *only* place a session is derived from an attempt id, and
+ * it is a corroboration rather than a lookup: the execution is already known, so the id records which
+ * host session it corresponds to instead of being asked to find one.
+ *
+ * A later disagreement is refused, because two different host sessions claiming one delivery is a defect
+ * rather than a rebinding.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution id.
+ * @param {object} input - `hostSessionId` and `attemptId`.
+ * @returns {object|null} the updated record.
+ */
+export function bindHostIdentity(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	const hostSessionId = String(input.hostSessionId ?? "");
+	if (record.hostSessionId !== "" && hostSessionId !== "" && record.hostSessionId !== hostSessionId) {
+		throw new Error(
+			`harnessmux: execution ${executionId} is already bound to host session ${record.hostSessionId}, refusing ${hostSessionId}`
+		);
+	}
+	return writeExecution(root, {
+		...record,
+		hostSessionId: record.hostSessionId !== "" ? record.hostSessionId : hostSessionId,
+		attemptId: input.attemptId === undefined ? record.attemptId : String(input.attemptId)
+	});
 }
 
 /**

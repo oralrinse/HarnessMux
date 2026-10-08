@@ -218,6 +218,19 @@ let finalCapture = null;
 const OPEN_ACCUMULATORS = new Map();
 
 /**
+ * The live agent object that was dispatched for each execution, keyed by the object itself.
+ *
+ * This is the identity chain that frame attribution depends on. It is a real reference comparison, not a
+ * lookup by name: an assistant-stream frame is only attributed to an execution when the frame's
+ * `agent` is the very object that was handed the delivery. A session can be named several ways and two
+ * sessions can produce frames at once, so anything weaker than object identity ends up guessing — and
+ * guessing here means silently presenting another session's output as this task's result.
+ *
+ * A WeakMap so a finished agent can be collected without an explicit cleanup step.
+ */
+const DISPATCHED_AGENTS = new WeakMap();
+
+/**
  * Resolve the bridge root for this plugin instance.
  *
  * @param {object} [config] - this plugin row's config.
@@ -1044,7 +1057,10 @@ export function apply(ctx, config = {}) {
 				// hand-off and the turn, the record says "work was dispatched for this delivery and its turn
 				// was never seen" — an answerable question. Recording afterwards would leave a completed
 				// turn that nothing can be traced back to.
-				beginDispatchRecord(delivery, claim, message, binding, "steer", sessionId);
+				const steerRecord = beginDispatchRecord(delivery, claim, message, binding, "steer", sessionId);
+				// The identity chain is registered before the host is touched: the first frame can arrive
+				// immediately, and attributing it afterwards would already be too late.
+				if (steerRecord !== null) DISPATCHED_AGENTS.set(agent, steerRecord.executionId);
 				agent.steer(makeUserMessage(deliveryText(delivery, claim, message)));
 				// Crash-injection hook: a file at this path simulates the process dying
 				// exactly between a successful steer and the ack that would follow it.
@@ -1139,7 +1155,7 @@ export function apply(ctx, config = {}) {
 		// Same ordering rule as the steer path: the correlation is durable before the host is touched, so
 		// a crash cannot leave a completed turn that nothing points back to.
 		const begun = beginDispatchRecord(delivery, claim, message, binding, "followup", targetSessionId);
-		wakeAgent(targetSessionId, text)
+		wakeAgent(targetSessionId, text, begun?.executionId ?? null)
 			.then((agent) => {
 				// The host accepted the delivery: this is what ACK has always meant here. It is not
 				// "the task is done", and it is not written until the turn actually opened.
@@ -1167,7 +1183,7 @@ export function apply(ctx, config = {}) {
 	 * @param {string} text - the model-facing text.
 	 * @returns {Promise<object|undefined>} the live agent, when the host gives one back.
 	 */
-	async function wakeAgent(targetSessionId, text) {
+	async function wakeAgent(targetSessionId, text, executionId = null) {
 		// Prefer an agent this process already holds for that session: the registry refuses a second
 		// live agent on one session, and a live idle agent only needs the wake. It counts as usable
 		// only if it can actually be woken, so the capability is checked rather than assumed.
@@ -1200,9 +1216,16 @@ export function apply(ctx, config = {}) {
 		//
 		// A synchronous throw is still possible and still has to reject this function, which awaiting
 		// covers for both cases.
+		//
+		// The agent is registered as this execution's dispatcher *before* the wake opens the turn. The
+		// first frame can arrive while `followup` is still pending, so registering afterwards — which is
+		// what the caller used to do inside a `.then()` that only runs once the whole turn has finished —
+		// would always be too late and every frame would look unattributable.
+		if (executionId !== null) {
+			DISPATCHED_AGENTS.set(agent, executionId);
+		}
+
 		await agent.followup(makeUserMessage(text));
-
-
 
 		return agent;
 	}
@@ -1409,60 +1432,56 @@ export function apply(ctx, config = {}) {
 			if (frame === null || typeof frame !== "object") return;
 			const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : "";
 			if (attemptId === "") return;
-			// The session id is deliberately NOT read from `payload.agent`. Measured on a real host, the
-			// agent on an assistant-stream payload carries no `session.header.id`, so reading it there
-			// returned an empty string and every frame was dropped: the turn opened, ran to completion, and
-			// the execution record stayed at `dispatching` forever — which looked exactly like "the turn
-			// never opened".
+
+			// Attribution is by object identity, and nothing else.
 			//
-			// The attempt id is the host's own key for this attempt, and its leading `<sessionId>:<turn>`
-			// form is the only place the session can be recovered from a frame. That is a *derivation for
-			// lookup*, not an identity: once an execution is bound, its recorded sessionId and attemptId
-			// take precedence and a disagreement is refused rather than followed.
-			// A session can be named by more than one id: the receiver addresses a delivery at the id it was
-			// given, while the host stamps attempts with the session's own id. Measured live those differ
-			// (`session-A-live` versus `session-<uuid>`), so matching on the attempt prefix alone finds
-			// nothing and every frame is dropped. Resolution therefore prefers identity, then falls back to
-			// *uniqueness*: if exactly one execution is outstanding, the frame can only be its. Two or more
-			// and nothing is bound — guessing which delivery a turn belongs to is the failure this layer
-			// exists to prevent.
-			const byAttempt = executionV2.executionForAttempt(root, attemptId);
-			const bySession = executionV2.outstandingExecution(root, sessionIdFromAttemptId(attemptId));
-			const outstanding = executionV2.outstandingExecutions(root);
-			const open = byAttempt ?? bySession ?? (outstanding.length === 1 ? outstanding[0] : null);
-			if (open === null) {
+			// A session can be named more than one way — the receiver addresses a delivery at the id it was
+			// given, the host stamps attempts with its own id — and several sessions can be producing frames
+			// at the same moment. Anything weaker than "this is the very agent object that was handed the
+			// delivery" ends up inferring, and inferring wrongly presents another session's output as this
+			// task's result. A missed frame costs a wait; a misattributed frame costs correctness.
+			//
+			// So: resolve by identity, then accept an execution already bound to this attempt id. There is
+			// deliberately no "exactly one outstanding, so it must be this" step. That inference produced a
+			// real misbinding on a live host, where the host's own turn was claimed for a delivery that
+			// belonged to a different session.
+			const dispatched = DISPATCHED_AGENTS.get(payload?.agent);
+			const bound = executionV2.executionForAttempt(root, attemptId);
+			const candidate = dispatched ?? bound;
+			if (candidate === undefined || candidate === null) {
+				// An unowned frame is ignored, and said out loud so a missing capture is diagnosable rather
+				// than invisible.
 				diagnoseOnChange(
-					`unmatched:${attemptId}`,
-					String(outstanding.length),
-					`capture: attempt ${attemptId} matches no execution and ${outstanding.length} are outstanding; not binding`
+					`unowned:${attemptId}`,
+					"1",
+					`capture: frame ${attemptId} has no dispatched agent and no bound execution; ignored rather than guessed`
+				);
+				return;
+			}
+			const open = executionV2.getExecution(root, candidate);
+			if (open === null) return;
+			if (open.attemptId !== null && open.attemptId !== attemptId) {
+				diagnoseOnChange(
+					`attempt-mismatch:${open.executionId}`,
+					attemptId,
+					`capture: frame attempt ${attemptId} does not match execution ${open.executionId}'s ${open.attemptId}; not binding`
 				);
 				return;
 			}
 			const sessionId = open.sessionId;
 			if (sessionId === "") return;
-			if (open !== null && open.attemptId !== null && open.attemptId !== attemptId) {
-				diagnoseOnChange(
-					`attempt-mismatch:${sessionId}`,
-					attemptId,
-					`capture: frame attempt ${attemptId} does not match the outstanding execution's ${open.attemptId}; not binding`
-				);
-				return;
-			}
-
 			const key = finalCapture.attemptKey(sessionId, attemptId);
 			let record = OPEN_ACCUMULATORS.get(key);
 			if (record === undefined) {
-				// The execution resolved above is the one this attempt belongs to. Re-resolving it here by
-				// session id used to shadow that decision and fail, because the delivery's session id and the
-				// host's attempt id name the same session differently.
+				// The execution was resolved by identity above. The first frame of its attempt is where the
+				// host's own session id becomes knowable, so it is frozen onto the record here — the delivery
+				// keeps its HarnessMux address, and the host identity is recorded beside it.
 				if (open.attemptId === null) {
-					executionV2.attachAttempt(root, open.executionId, { attemptId, turn: finalCapture.turnFromAttemptId(attemptId) });
-					diagnose(`capture: bound execution ${open.executionId} to attempt ${attemptId}`);
-				} else if (open.attemptId !== attemptId) {
-					// A different attempt for the same session while one is outstanding: the commander loop
-					// allows one round at a time, so this is reported rather than guessed at.
-					diagnoseOnChange(`attempt-conflict:${sessionId}`, attemptId, `capture: session ${sessionId} produced attempt ${attemptId} while ${open.attemptId} is outstanding; not binding`);
-					return;
+					executionV2.bindHostIdentity(root, open.executionId, {
+						hostSessionId: sessionIdFromAttemptId(attemptId),
+						attemptId
+					});
+					diagnose(`capture: bound execution ${open.executionId} to host attempt ${attemptId}`);
 				}
 				record = finalCapture.createAccumulator({ sessionId, attemptId });
 				OPEN_ACCUMULATORS.set(key, record);
@@ -1472,8 +1491,7 @@ export function apply(ctx, config = {}) {
 			// A finished attempt closes its execution. The record keeps the text and the anchor; sending an
 			// answer is a later, separate step.
 			if (frame.type === "end") {
-				const open = executionV2.executionForAttempt(root, attemptId);
-				if (open !== null && open.state !== "turn_completed" && open.state !== "replied") {
+				if (open.state !== "turn_completed" && open.state !== "replied") {
 					const verdict = finalCapture.completionOf(record);
 					executionV2.completeExecution(root, open.executionId, {
 						finalText: finalCapture.finalTextOf(record),
