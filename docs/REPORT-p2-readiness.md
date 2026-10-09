@@ -38,10 +38,14 @@ Two layers, and they fail differently:
 ## 3. The consequence, stated exactly
 
 **The P2 chain cannot be driven headlessly through `codex exec` in this Codex build**: MCP tools are not
-exposed to that session, so Codex has no `send_message` and no `wait_for_reply`. The interactive Codex
-surface is where the tools live — which is also where the earlier acceptance artifacts in
-`.claude-acceptance/` came from (`d1-d2-get-status.txt`, `d3-send.txt`, `d5-reply.txt` are real tool
-output).
+exposed to that session, so Codex has no `send_message` and no `wait_for_reply`.
+
+> **Corrected 2026-10-09, later the same day.** This section originally continued "the interactive Codex
+> surface is where the tools live". That was wrong, and the follow-up diagnosis
+> ([REPORT-mcp-tool-exposure.md](REPORT-mcp-tool-exposure.md)) shows why: the interactive desktop session has
+> **no MCP tools either**, because it runs inside WSL while the installed MCP entry is a Windows-only command.
+> `codex exec` and the interactive session fail for the *same* environmental reason, not because `exec` is
+> special. The layered evidence (A–F) and the fix options are in that report.
 
 So the Commander has to be driven through a session that has the tools. Two ways, and the choice is the
 user's because one of them types into their own Codex conversation:
