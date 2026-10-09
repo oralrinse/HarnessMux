@@ -268,6 +268,33 @@ let makeUserMessage = (text) => ({
 	source: CONTEXT_SOURCE
 });
 
+/**
+ * Build the message handed to a host dispatch, carrying HarnessMux's own identity for it.
+ *
+ * The `id` is the dispatch key, and that is the whole point of the mechanism: measured on a live host, a
+ * caller-supplied `user/message` id survives into the durable `agent/inbox/spliced` event appended
+ * *synchronously* by `followup()`, into the `user/message` event the loop appends when it drains the
+ * inbox, and into the durable record readable through `sessionQuery.observeSession`. So after a crash the
+ * dispatch can be recognised from the side that caused it, instead of being repeated or guessed at.
+ *
+ * `createUserMessage` cannot be used here: it overwrites `id` with a fresh uuid. The shape built here is
+ * the same one this plugin already falls back to when that import fails, which is the shape measured to
+ * work.
+ *
+ * @param {string} text - the model-facing text.
+ * @param {string} dispatchKey - the identity to attach, or "" for an ordinary message.
+ * @returns {object} the message.
+ */
+function makeDispatchMessage(text, dispatchKey) {
+	if (typeof dispatchKey !== "string" || dispatchKey === "") return makeUserMessage(text);
+	return {
+		id: dispatchKey,
+		role: "user",
+		content: [{ type: "text", text }],
+		source: CONTEXT_SOURCE
+	};
+}
+
 // Opportunistic: real constructor when resolvable, literal fallback otherwise.
 import("@deepseek-ai/dsh-llm")
 	.then((module) => {
@@ -462,6 +489,19 @@ export function apply(ctx, config = {}) {
 	const crashAfterAutoReplyPath = typeof config.crashAfterAutoReplySentinel === "string" ? config.crashAfterAutoReplySentinel.trim() : "";
 	/** Set when the crash sentinel has fired: this instance stops reconciling, as a dead process would. */
 	let autoReplyCrashObserved = false;
+	// The same hook for the dispatch window: it exits the process *after* the host accepted the dispatch
+	// and *before* the ack, which is the crash P1d has to survive. Empty means "never".
+	const crashAfterWakePath = typeof config.crashAfterWakeSentinel === "string" ? config.crashAfterWakeSentinel.trim() : "";
+	/** How long the crash sentinel waits before exiting, so the host can flush what it accepted. */
+	const crashAfterWakeDelayMs = Number.isFinite(Number(config.crashAfterWakeDelayMs)) ? Math.max(0, Number(config.crashAfterWakeDelayMs)) : 0;
+	/**
+	 * Set when the dispatch crash sentinel fires: this receiver does nothing further.
+	 *
+	 * The process lingers only so the host can flush what it already accepted; the *receiver* is dead from
+	 * that instant, which is what makes the crash window observable instead of being repaired by this very
+	 * instance's next tick.
+	 */
+	let crashed = false;
 	// Diagnostics: this row's `debugLog` wins, so a running app can be traced by
 	// editing the profile patch instead of relaunching with an env var.
 	//
@@ -1160,6 +1200,49 @@ export function apply(ctx, config = {}) {
 				continue;
 			}
 			if (disposition === "wake") {
+				// A delivery that was already dispatched must never be dispatched again. This is the last
+				// check before the host is touched, and it is the one that survives a crash.
+				//
+				// Two cases, and they are decided differently:
+				//   `dispatch_inflight`  the host call was made and its outcome is unknown — ask the record.
+				//   anything else with a dispatch key  the host already accepted it (the state only advances
+				//                        after `followup` resolves), so this is a re-claim of work in flight.
+				const previous = executionV2 === null ? null : executionV2.executionForDelivery(root, delivery.deliveryId);
+				if (previous !== null && previous.state !== "dispatching" && previous.dispatchKey !== null && previous.dispatchKey !== "") {
+					if (previous.state !== "dispatch_inflight") {
+						// Already accepted by the host. Re-claiming it says nothing about the work, which is
+						// either running or done; ack it as recovered and leave the host alone.
+						mailboxV2.ackDelivery(root, delivery.deliveryId, { owner, note: "recovered" });
+						retryAfter.delete(backoffKey(delivery.deliveryId));
+						diagnose(`pump: delivery ${delivery.deliveryId} was already accepted by the host as execution ${previous.executionId} (${previous.state}, key ${previous.dispatchKey}); acknowledged as recovered, no second host call`);
+						continue;
+					}
+					const recovery = dispatchIdentityStatusLive(previous);
+					if (recovery.status === "found") {
+						// The host already has it: adopt it and ack, without calling the host at all.
+						executionV2.adoptDispatch(root, previous.executionId, { hostUserMessageId: recovery.where });
+						mailboxV2.ackDelivery(root, delivery.deliveryId, { owner, note: "recovered" });
+						retryAfter.delete(backoffKey(delivery.deliveryId));
+						diagnose(`pump: delivery ${delivery.deliveryId} was already dispatched as execution ${previous.executionId} (key ${recovery.where} in ${recovery.source}); recovered and acked without a second host call`);
+						continue;
+					}
+					if (recovery.status === "unknown") {
+						// Cannot prove it did not happen. Wait: a duplicate host dispatch is worse than a
+						// delivery that waits for its session to become readable again.
+						mailboxV2.releaseDelivery(root, delivery.deliveryId, { reason: "dispatch-ambiguous" });
+						retryAfter.set(backoffKey(delivery.deliveryId), Date.now() + RETRY_BASE_MS);
+						diagnoseOnChange(
+							`dispatch-ambiguous:${previous.executionId}`,
+							recovery.source,
+							`pump: deferring ${delivery.deliveryId} — the earlier dispatch of execution ${previous.executionId} cannot be resolved (${recovery.source}); not dispatching again`
+						);
+						continue;
+					}
+					// `absent`: the record is readable and the key is not in it, so the earlier attempt caused
+					// nothing that survived. Dispatching again is safe, under the same key.
+					executionV2.resetDispatch(root, previous.executionId, { reason: `key ${recovery.where} absent from ${recovery.source}` });
+					diagnose(`pump: delivery ${delivery.deliveryId} was never accepted by the host (key absent from ${recovery.source}); dispatching it now`);
+				}
 				wakeForDelivery(delivery, claim, message, binding, owner, sessionId);
 				continue;
 			}
@@ -1233,6 +1316,150 @@ export function apply(ctx, config = {}) {
 			return "skip";
 		}
 		return "wake";
+	}
+
+	/**
+	 * Find a dispatch key in a session's own event list.
+	 *
+	 * Two anchors, because both were measured to carry it: the `agent/inbox/spliced` event the host
+	 * appends *synchronously* while `followup()` runs, and the `user/message` event it appends when the
+	 * inbox is drained a few tens of milliseconds later. Either one proves the dispatch happened.
+	 *
+	 * @param {object[]} events - the session's events.
+	 * @param {string} key - the dispatch key.
+	 * @returns {object|null} the event that carries it, or null.
+	 */
+	function findDispatchKey(events, key) {
+		if (!Array.isArray(events)) return null;
+		for (const event of events) {
+			if (event?.type === "agent/inbox/spliced" && (event?.data?.inserted ?? []).some((entry) => entry?.id === key)) return event;
+			if (event?.type === "user/message" && event?.data?.id === key) return event;
+		}
+		return null;
+	}
+
+	/**
+	 * The synchronous half of {@link dispatchIdentityStatus}: a live session in this process only.
+	 *
+	 * The pump's claim path cannot wait on the durable store — it runs inside a synchronous tick — so the
+	 * cheap, authoritative check happens here and the durable read is left to the reconciler. The
+	 * completeness guard matters: a record whose highest sequence is *below* this execution's dispatch
+	 * baseline cannot be the record the dispatch was made against, so it is `unknown` rather than `absent`.
+	 *
+	 * @param {object} record - the execution whose dispatch is in question.
+	 * @returns {{status: "found"|"absent"|"unknown", where: string, seq: number|null, source: string}} the answer.
+	 */
+	function dispatchIdentityStatusLive(record) {
+		if (executionV2 === null) return { status: "unknown", where: "", seq: null, source: "no-execution-layer" };
+		const key = typeof record.dispatchKey === "string" && record.dispatchKey !== "" ? record.dispatchKey : executionV2.dispatchKeyFor(record.executionId);
+		if (key === "") return { status: "unknown", where: "", seq: null, source: "no-key" };
+		// A record read within one watch interval of the call is not yet evidence of anything: the host
+		// appends the keyed splice synchronously, but the receiver's own view of that record, and a durable
+		// read taken outside the host, can both lag it. Measured, the splice is at the call and the keyed
+		// `user/message` follows ~25–30 ms later; one pump interval is two orders of magnitude above that
+		// and is taken from the receiver's own cadence rather than from a hand-picked sleep.
+		const attemptedAt = Date.parse(record.dispatchAttemptedAt ?? "");
+		if (Number.isFinite(attemptedAt) && Date.now() - attemptedAt < watchIntervalMs(config)) {
+			return { status: "unknown", where: key, seq: null, source: "too-soon-to-tell" };
+		}
+		const agent = liveAgentFor(record.sessionId);
+		const session = agent?.session ?? null;
+		if (session === null) return { status: "unknown", where: key, seq: null, source: "no-live-session" };
+		const events = typeof session.snapshotEvents === "function" ? session.snapshotEvents() : session.log;
+		if (!Array.isArray(events)) return { status: "unknown", where: key, seq: null, source: "live-session-unreadable" };
+		const highest = events.length === 0 ? -1 : (Number.isInteger(events[events.length - 1]?.seq) ? events[events.length - 1].seq : -1);
+		if (record.baselineLogSeq !== null && highest < record.baselineLogSeq) {
+			// The record does not even reach the point the dispatch was made from; reading it as "absent"
+			// would be reading an incomplete record as evidence.
+			return { status: "unknown", where: key, seq: null, source: "live-record-below-baseline" };
+		}
+		const hit = findDispatchKey(events, key);
+		return hit === null
+			? { status: "absent", where: key, seq: null, source: "live-session" }
+			: { status: "found", where: key, seq: hit.seq ?? null, source: "live-session" };
+	}
+
+	/**
+	 * Where one dispatch's identity can be found, or why that cannot be decided.
+	 *
+	 * This is the whole of P1d's correctness. The dispatch key is attached to the host input, so the side
+	 * that caused the side effect can ask the host, later and from a different process, whether it
+	 * happened. Three answers, and only three:
+	 *
+	 *   `found`    the key is in the target session's own record — the host accepted that dispatch, so it
+	 *              must never be issued again.
+	 *   `absent`   the record was read and the key is not in it — no side effect survived, so a dispatch
+	 *              is still owed.
+	 *   `unknown`  no record could be read at all. **Never** treated as absent: a session that is not
+	 *              loaded, an unreadable store, or a record that has not been flushed all look the same
+	 *              from here, and guessing "it never happened" is exactly how a task runs twice.
+	 *
+	 * The read is the session's own event list, live when this process holds the session and from the
+	 * durable store (`sessionQuery.observeSession`) when it does not — measured on a live host, both carry
+	 * the keyed `agent/inbox/spliced` and `user/message`.
+	 *
+	 * @param {object} record - the execution whose dispatch is in question.
+	 * @returns {Promise<{status: "found"|"absent"|"unknown", where: string, seq: number|null, source: string}>} the answer.
+	 */
+	async function dispatchIdentityStatus(record) {
+		const live = dispatchIdentityStatusLive(record);
+		if (live.status !== "unknown" || live.source === "no-key" || live.source === "no-execution-layer") return live;
+		const key = live.where === "" ? executionV2.dispatchKeyFor(record.executionId) : live.where;
+		const sessionId = record.sessionId;
+		// The durable record is the only authority once this process holds no session for it.
+		try {
+			const query = typeof ctx.get === "function" ? ctx.get("sessionQuery") : undefined;
+			if (query !== undefined && typeof query?.observeSession === "function" && typeof sessionId === "string" && sessionId !== "") {
+				const observation = await query.observeSession(sessionId);
+				const events = Array.isArray(observation?.events) ? observation.events : null;
+				if (events === null) return { status: "unknown", where: key, seq: null, source: "durable-record-unreadable" };
+				const hit = findDispatchKey(events, key);
+				return hit === null
+					? { status: "absent", where: key, seq: null, source: "durable-record" }
+					: { status: "found", where: key, seq: hit.seq ?? null, source: "durable-record" };
+			}
+		} catch (error) {
+			diagnose(`dispatch: could not read the durable record for ${sessionId}: ${String(error?.message ?? error)}`);
+			return { status: "unknown", where: key, seq: null, source: `durable-record-error:${String(error?.message ?? error)}` };
+		}
+		return { status: "unknown", where: key, seq: null, source: live.source };
+	}
+
+	/**
+	 * Resolve every dispatch whose outcome is unknown, without ever guessing.
+	 *
+	 * Runs on the watcher tick so the answer is reached as soon as any record can be read — before the
+	 * lease expires and the delivery becomes claimable again, which is the moment a wrong answer would do
+	 * damage.
+	 *
+	 * @returns {Promise<void>}
+	 */
+	async function reconcileDispatches() {
+		try {
+			if (executionV2 === null) return;
+			if (crashed) return;
+			for (const record of executionV2.executionsAwaitingDispatchRecovery(root)) {
+				const status = await dispatchIdentityStatus(record);
+				// Re-checked after the await: reading a durable record takes time, and a receiver that died
+				// while it was reading must not act on the answer it got back.
+				if (crashed) return;
+				if (status.status === "found") {
+					executionV2.adoptDispatch(root, record.executionId, { hostUserMessageId: status.where });
+					diagnose(`dispatch: execution ${record.executionId} recovered — its key ${status.where} is in the session record (${status.source}, seq ${status.seq}); the host dispatch is not repeated`);
+				} else if (status.status === "absent") {
+					executionV2.resetDispatch(root, record.executionId, { reason: `key ${status.where} absent from ${status.source}` });
+					diagnose(`dispatch: execution ${record.executionId} was never accepted — key ${status.where} is absent from the readable session record (${status.source}); a dispatch is still owed`);
+				} else {
+					diagnoseOnChange(
+						`dispatch-ambiguous:${record.executionId}`,
+						status.source,
+						`dispatch: execution ${record.executionId} cannot be resolved yet (${status.source}); waiting rather than dispatching again`
+					);
+				}
+			}
+		} catch (error) {
+			ctx.logger?.warn?.(`[harnessmux] dispatch reconciliation failed: ${String(error)}`);
+		}
 	}
 
 	/**
@@ -1369,7 +1596,7 @@ export function apply(ctx, config = {}) {
 	function reconcileAutoReplies() {
 		try {
 			if (executionV2 === null || mailboxV2 === null) return;
-			if (autoReplyCrashObserved) return;
+			if (autoReplyCrashObserved || crashed) return;
 			for (const record of executionV2.pendingAutoReplies(root)) {
 				try {
 					ensureAutomaticReply(record);
@@ -1435,8 +1662,16 @@ export function apply(ctx, config = {}) {
 		// Same ordering rule as the steer path: the correlation is durable before the host is touched, so
 		// a crash cannot leave a completed turn that nothing points back to.
 		const begun = beginDispatchRecord(delivery, claim, message, binding, "followup", targetSessionId);
-		wakeAgent(targetSessionId, text, begun?.executionId ?? null)
+		// The dispatch identity is written *before* the call, because the call is the side effect. A record
+		// left in `dispatch_inflight` means "a host dispatch was attempted and its outcome is unknown",
+		// and the recovery pass answers that by looking for the key — never by dispatching again.
+		const dispatchKey = begun === null || executionV2 === null ? "" : executionV2.dispatchKeyFor(begun.executionId);
+		if (begun !== null && dispatchKey !== "") executionV2.markDispatchInflight(root, begun.executionId, { dispatchKey });
+		wakeAgent(targetSessionId, text, begun?.executionId ?? null, dispatchKey)
 			.then((agent) => {
+				// The crash hook fires inside `wakeAgent`, so nothing here may run afterwards: no state, no
+				// dispatch record, no ack. That is the window recovery has to resolve.
+				if (crashed) return;
 				// The host accepted the delivery: this is what ACK has always meant here. It is not
 				// "the task is done", and it is not written until the turn actually opened.
 				if (begun !== null) markExecutionRunning(root, begun.executionId);
@@ -1461,9 +1696,11 @@ export function apply(ctx, config = {}) {
 	 *
 	 * @param {string} targetSessionId - the session to wake.
 	 * @param {string} text - the model-facing text.
+	 * @param {string|null} executionId - the workflow execution this wake belongs to.
+	 * @param {string} dispatchKey - the identity to attach to the host input, or "".
 	 * @returns {Promise<object|undefined>} the live agent, when the host gives one back.
 	 */
-	async function wakeAgent(targetSessionId, text, executionId = null) {
+	async function wakeAgent(targetSessionId, text, executionId = null, dispatchKey = "") {
 		// Prefer an agent this process already holds for that session: the registry refuses a second
 		// live agent on one session, and a live idle agent only needs the wake. It counts as usable
 		// only if it can actually be woken, so the capability is checked rather than assumed.
@@ -1505,7 +1742,22 @@ export function apply(ctx, config = {}) {
 			DISPATCHED_AGENTS.set(agent, executionId);
 		}
 
-		await agent.followup(makeUserMessage(text));
+		// The dispatch identity travels on the message itself. It is the `id`, not a marker in the text:
+		// measured, a caller-supplied id is preserved by the host into the durable inbox splice and the
+		// user message, so it identifies the dispatch without changing a word the model reads.
+		await agent.followup(makeDispatchMessage(text, dispatchKey));
+
+		// Test-only: the dispatch has just happened, and this receiver is dead from this instant. The flag
+		// is set *here*, synchronously, rather than in the caller's `.then`: anything queued as a microtask
+		// after the call — the reconcilers included — would otherwise still run, and would repair the very
+		// window this hook exists to create. The process lingers only so the host can flush what it took.
+		if (crashAfterWakePath !== "" && existsSync(crashAfterWakePath)) {
+			crashed = true;
+			ctx.logger?.warn?.(`[harnessmux] crash-after-wake sentinel present: dispatch ${dispatchKey} was handed over; nothing is recorded and the delivery stays unacked on purpose`);
+			diagnose(`pump: crash-after-wake sentinel present, exiting with execution ${executionId ?? "?"} at dispatch_inflight and its delivery unacked`);
+			if (crashAfterWakeDelayMs > 0) setTimeout(() => process.exit(1), crashAfterWakeDelayMs);
+			else process.exit(1);
+		}
 
 		return agent;
 	}
@@ -1591,6 +1843,8 @@ export function apply(ctx, config = {}) {
 					return;
 				}
 				refreshEndpointIfChanged();
+				// A crashed receiver stops acting, even though the process lingers for the host to flush.
+				if (crashed) return;
 				if (protocolVersion === "v2") {
 					// One pump at a time: a slow steer must not double-claim.
 					if (pumping) return;
@@ -1604,6 +1858,10 @@ export function apply(ctx, config = {}) {
 						// The return leg: any captured answer that is owed and not yet sent. Reading it from
 						// the store rather than from the sessions is what makes it survive a restart.
 						reconcileAutoReplies();
+						// Dispatch outcomes that are still unknown, resolved before anything may be retried.
+						// Not awaited: reading a durable record can be slow, the pump must not wait on it, and
+						// the resolution is idempotent and does its own error handling.
+						void reconcileDispatches();
 						for (const candidate of pumpCandidates()) {
 							if (candidate.status === "unloaded") pumpV2(candidate);
 						}
@@ -1654,6 +1912,13 @@ export function apply(ctx, config = {}) {
 			const liveSession = live?.session ?? null;
 			const liveEvents = liveSession === null ? null : typeof liveSession.snapshotEvents === "function" ? liveSession.snapshotEvents() : liveSession.log;
 			const baselineSeq = Array.isArray(liveEvents) ? (liveEvents.at(-1)?.seq ?? 0) : null;
+			// One delivery has one execution. A retry after a dispatch was proved absent re-points the
+			// existing one at a fresh attempt instead of creating a second record for the same delivery,
+			// which keeps the dispatch key — and therefore the identity the host sees — stable.
+			const existing = executionV2.executionForDelivery(root, delivery.deliveryId);
+			if (existing !== null && existing.state !== "replied" && existing.state !== "failed" && existing.state !== "dispatch_failed") {
+				return executionV2.rebaseExecution(root, existing.executionId, { baselineLogSeq: Number.isInteger(baselineSeq) ? baselineSeq : null });
+			}
 			return executionV2.beginExecution(root, {
 				baselineLogSeq: Number.isInteger(baselineSeq) ? baselineSeq : null,
 				deliveryId: delivery.deliveryId,

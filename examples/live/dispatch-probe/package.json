@@ -1,0 +1,10 @@
+{
+  "name": "@harnessmux/dispatch-probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reconnaissance instrument: can HarnessMux attach a deterministic identity to a host dispatch, and does the host keep it? Never shipped.",
+  "exports": {
+    ".": "./index.js"
+  }
+}

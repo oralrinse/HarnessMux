@@ -53,7 +53,7 @@ const EXECUTION_DIR = "executions";
  * `doctor` run has to be able to tell a stuck executor from a finished one whose return leg never
  * landed — which is exactly the window `reply_pending` names.
  */
-export const EXECUTION_STATES = ["dispatching", "running", "completed", "reply_pending", "replied", "failed", "dispatch_failed"];
+export const EXECUTION_STATES = ["dispatching", "dispatch_inflight", "running", "completed", "reply_pending", "replied", "failed", "dispatch_failed"];
 
 /**
  * States in which an execution is still this session's outstanding work.
@@ -63,7 +63,28 @@ export const EXECUTION_STATES = ["dispatching", "running", "completed", "reply_p
  * reconciler. It cannot be mistaken for an owned open turn, because `ownsOpenTurn` requires a turn
  * whose `turnEndSeq` is still null.
  */
-const OUTSTANDING_STATES = ["dispatching", "running", "completed", "reply_pending"];
+const OUTSTANDING_STATES = ["dispatching", "dispatch_inflight", "running", "completed", "reply_pending"];
+
+/**
+ * The deterministic identity HarnessMux attaches to a host dispatch.
+ *
+ * It becomes the `id` of the message handed to `followup`, which is what makes the dispatch answerable
+ * from the side that *caused* it rather than inferred from its side effects. Measured on a live host: a
+ * caller-supplied `user/message` id survives into both the durable `agent/inbox/spliced` event (appended
+ * synchronously, before the host call returns) and the later `user/message` event, and is readable from
+ * the durable store through `sessionQuery.observeSession`.
+ *
+ * `dsh-llm`'s `createUserMessage` cannot be used for this: it overwrites `id` with a fresh uuid
+ * (`createMessage({...input, id: brandString(randomUUID())})`). The message is therefore built directly,
+ * exactly as this plugin's own no-dsh-llm fallback already did.
+ *
+ * @param {string} executionId - the execution.
+ * @returns {string} the dispatch key, or an empty string when there is no execution.
+ */
+export function dispatchKeyFor(executionId) {
+	const id = String(executionId ?? "").trim();
+	return id === "" ? "" : `hxmux-dispatch:${id}`;
+}
 
 /**
  * Path for one execution record.
@@ -163,6 +184,11 @@ export function beginExecution(root, input = {}) {
 		turns: [],
 		// Where the target session's log stood when this delivery was dispatched.
 		baselineLogSeq: Number.isInteger(input.baselineLogSeq) ? input.baselineLogSeq : null,
+		// The dispatch identity: the key HarnessMux attaches to the host input, and the host's own id for
+		// the message it accepted. Both are recorded so the dispatch can be recognised after a crash
+		// instead of being repeated on the assumption that it never happened.
+		dispatchKey: null,
+		hostUserMessageId: null,
 		// The terminal answer, taken from the target session's own event list.
 		finalAssistantMessageSeq: null,
 		finalText: "",
@@ -185,6 +211,134 @@ export function beginExecution(root, input = {}) {
 		createdAt: now,
 		updatedAt: now
 	});
+}
+
+/**
+ * Re-point an execution at a fresh dispatch, keeping its identity.
+ *
+ * One delivery has one execution, and a retry is a retry of *that* execution rather than a new one: the
+ * dispatch key stays `hxmux-dispatch:<executionId>`, so the identity the host would see does not change
+ * between attempts. Only reachable after a dispatch was proved absent — nothing happened, so nothing
+ * that was recorded for it is kept.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @param {object} input - `baselineLogSeq` taken before this attempt.
+ * @returns {object|null} the updated record.
+ */
+export function rebaseExecution(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	return writeExecution(root, {
+		...record,
+		state: "dispatching",
+		baselineLogSeq: Number.isInteger(input.baselineLogSeq) ? input.baselineLogSeq : null,
+		turns: [],
+		pendingAttempts: [],
+		finalText: "",
+		finalAssistantMessageSeq: null,
+		finalTurn: null,
+		attemptId: null,
+		turn: null,
+		reason: null,
+		assistantMessageSeq: null,
+		dispatchAttemptedAt: null,
+		hostUserMessageId: null
+	});
+}
+
+/**
+ * Record that a host call is being made, and under which identity.
+ *
+ * Written **before** `followup`/`steer` is called, because that call is the external side effect. A
+ * record found in this state after a crash means "a dispatch was attempted and its outcome is unknown",
+ * which is a question the recovery pass answers by looking for the key — never by dispatching again on
+ * the assumption that nothing happened.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @param {object} input - `dispatchKey`.
+ * @returns {object|null} the updated record.
+ */
+export function markDispatchInflight(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	return writeExecution(root, {
+		...record,
+		state: "dispatch_inflight",
+		dispatchKey: String(input.dispatchKey ?? record.dispatchKey ?? ""),
+		// When the host was called. `absent` may only be concluded from a record read *after* this, and the
+		// caller enforces a margin — a record that cannot yet contain the dispatch must never be read as
+		// proof that the dispatch did not happen.
+		dispatchAttemptedAt: new Date().toISOString()
+	});
+}
+
+/**
+ * Adopt the host message and turn a recovered dispatch already produced.
+ *
+ * Called only when the key has been *found* in the target session's own record. It asserts no new
+ * dispatch: the host's work is recognised, not repeated.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @param {object} input - `hostUserMessageId` and optional `turn`.
+ * @returns {object|null} the updated record.
+ */
+export function adoptDispatch(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	const messageId = String(input.hostUserMessageId ?? record.dispatchKey ?? "");
+	return writeExecution(root, {
+		...record,
+		state: record.state === "completed" || record.state === "reply_pending" || record.state === "replied" ? record.state : "running",
+		hostUserMessageId: messageId === "" ? record.hostUserMessageId : messageId,
+		...(Number.isInteger(input.turn) ? { turn: input.turn } : {})
+	});
+}
+
+/**
+ * Return an execution to "not yet dispatched" after the key was proved absent.
+ *
+ * Proof, not a timeout: the caller may only do this when it could read the target session's own record
+ * and the key was not there, which means the external side effect never happened. Everything else waits.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @param {object} input - `reason`, for the record.
+ * @returns {object|null} the updated record.
+ */
+export function resetDispatch(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	return writeExecution(root, { ...record, state: "dispatching", reason: String(input.reason ?? "dispatch proved absent") });
+}
+
+/**
+ * Executions whose dispatch outcome is unknown and must be resolved before anything else happens.
+ *
+ * @param {string} root - bridge root.
+ * @returns {object[]} the records awaiting dispatch recovery, oldest first.
+ */
+export function executionsAwaitingDispatchRecovery(root) {
+	return listExecutions(root).filter((record) => record.state === "dispatch_inflight");
+}
+
+/**
+ * The execution recorded for one delivery, if any.
+ *
+ * A delivery is dispatched at most once per execution, and this is how a re-claim tells "this delivery
+ * is already dispatched" from "this delivery needs dispatching".
+ *
+ * @param {string} root - bridge root.
+ * @param {string} deliveryId - the delivery.
+ * @returns {object|null} the newest execution for that delivery, or null.
+ */
+export function executionForDelivery(root, deliveryId) {
+	const id = String(deliveryId ?? "");
+	if (id === "") return null;
+	const live = listExecutions(root).filter((record) => record.deliveryId === id);
+	return live.length === 0 ? null : live[live.length - 1];
 }
 
 /**

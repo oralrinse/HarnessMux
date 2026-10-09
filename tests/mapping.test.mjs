@@ -300,10 +300,12 @@ withRoot((root) => {
 {
 	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
 	// The call must be awaited. A bare `agent.followup(` preceded by `await` is what makes the
-	// difference, so the assertion is on the awaited form rather than on the word alone.
-	assert.match(source, /await agent\.followup\(makeUserMessage\(text\)\)/u, "the wake awaits the turn boundary it opens");
+	// difference, so the assertion is on the awaited form rather than on the word alone. The message
+	// constructor is matched loosely — it became `makeDispatchMessage(text, dispatchKey)` when the
+	// dispatch identity was added — while the `await` is still required literally.
+	assert.match(source, /await agent\.followup\([A-Za-z_$][\w$]*\([^)]*\)\)/u, "the wake awaits the turn boundary it opens");
 	assert.equal(
-		/(?<!await )\bagent\.followup\(makeUserMessage\(text\)\)/u.test(source.replace(/await agent\.followup\(makeUserMessage\(text\)\)/gu, "")),
+		/(?<!await )\bagent\.followup\(/u.test(source.replace(/await agent\.followup\([^)]*\)/gu, "")),
 		false,
 		"and no discarded followup promise remains"
 	);
@@ -348,7 +350,7 @@ withRoot((root) => {
 	const wakeStart = source.indexOf("async function wakeAgent(");
 	assert.notEqual(wakeStart, -1, "the wake path exists");
 	const registration = source.indexOf("DISPATCHED_AGENTS.set(agent, executionId);", wakeStart);
-	const wake = source.indexOf("await agent.followup(makeUserMessage(text));", wakeStart);
+	const wake = source.indexOf("await agent.followup(makeDispatchMessage(text, dispatchKey));", wakeStart);
 	assert.notEqual(registration, -1, "the wake path registers the agent it will use");
 	assert.notEqual(wake, -1, "and then wakes");
 	assert.equal(registration < wake, true, "registering before the wake, because the first frame can arrive while followup is pending");

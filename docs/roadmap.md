@@ -115,11 +115,14 @@ is still legal and nothing is ever guessed. `watchIntervalMs` sets the worst-cas
 
 Closed by measurement since: the turn boundary and the final assistant text
 ([REPORT-commander-mode.md](REPORT-commander-mode.md) — a delegated delivery to an idle session opens its
-own turn, and the answer is the last text-bearing `assistant/message` inside the completed turn), and the
+own turn, and the answer is the last text-bearing `assistant/message` inside the completed turn), the
 automatic return of that answer ([REPORT-automatic-reply.md](REPORT-automatic-reply.md) — the captured
 text is posted back on the origin thread under a deterministic request id, exactly once, including across
-the crash window). Still open: the Codex-side lifecycle re-check, and delivery-level restart
-reconciliation (P1d).
+the crash window), and now the dispatch itself
+([REPORT-dispatch-exactly-once.md](REPORT-dispatch-exactly-once.md) — the host input carries
+`hxmux-dispatch:<executionId>` as its `user/message` id, and a second receiver recovers the dispatch it
+already accepted instead of issuing it again). Still open: the Codex-side lifecycle re-check, and the
+same-execution `steer` identity.
 
 ### P4.5 — Visible Executor Mode *(recon complete, implementation not started)*The gap this closes: a delegated task today waits for a human to give DSH a turn.
 
