@@ -331,7 +331,7 @@ withRoot((root) => {
 		false,
 		"the count of outstanding executions still never picks an owner"
 	);
-	assert.match(source, /for \(const record of executionV2\.outstandingExecutions\(root\)\)/u, "it iterates sessions to read their logs instead");
+	assert.match(source, /for \(const record of outstanding\)/u, "it iterates sessions to read their logs instead");
 
 	// Attribution must be anchored on the dispatched agent object.
 	assert.match(source, /DISPATCHED_AGENTS = new WeakMap\(\)/u, "the dispatcher is tracked by object identity");

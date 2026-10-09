@@ -146,7 +146,7 @@ export function beginExecution(root, input = {}) {
 		// the turn they occurred in, as diagnostics, and never create a turn by themselves.
 		turns: [],
 		// Where the target session's log stood when this delivery was dispatched.
-		baselineLogSeq: null,
+		baselineLogSeq: Number.isInteger(input.baselineLogSeq) ? input.baselineLogSeq : null,
 		// The terminal answer, taken from the target session's own event list.
 		finalAssistantMessageSeq: null,
 		finalText: "",

@@ -1410,7 +1410,16 @@ export function apply(ctx, config = {}) {
 	function beginDispatchRecord(delivery, claim, message, binding, kind, targetSessionId) {
 		try {
 			if (executionV2 === null) return null;
+			// The baseline is taken *before* the host is touched: turns opened by this delivery must have a
+			// sequence above it. Taking it on the first watcher pass is too late — measured, the delivery was
+			// dispatched first and the baseline then landed past the very `turn/start` it was meant to bound,
+			// so the turn was filtered out as pre-existing and the execution stayed at `dispatching`.
+			const live = liveAgentFor(targetSessionId);
+			const liveSession = live?.session ?? null;
+			const liveEvents = liveSession === null ? null : typeof liveSession.snapshotEvents === "function" ? liveSession.snapshotEvents() : liveSession.log;
+			const baselineSeq = Array.isArray(liveEvents) ? (liveEvents.at(-1)?.seq ?? 0) : null;
 			return executionV2.beginExecution(root, {
+				baselineLogSeq: Number.isInteger(baselineSeq) ? baselineSeq : null,
 				deliveryId: delivery.deliveryId,
 				originMessageId: delivery.messageId,
 				threadId: message?.threadId ?? "",
@@ -1471,7 +1480,8 @@ export function apply(ctx, config = {}) {
 	function watchSessionLogs() {
 		try {
 			if (executionV2 === null || finalCapture === null) return;
-			for (const record of executionV2.outstandingExecutions(root)) {
+			const outstanding = executionV2.outstandingExecutions(root);
+			for (const record of outstanding) {
 				const sessionId = record.sessionId;
 				if (typeof sessionId !== "string" || sessionId === "") continue;
 				const agent = liveAgentFor(sessionId);
@@ -1480,12 +1490,9 @@ export function apply(ctx, config = {}) {
 				if (session === null) continue;
 				const events = typeof session.snapshotEvents === "function" ? session.snapshotEvents() : session.log;
 				if (!Array.isArray(events)) continue;
-				// The baseline is captured once, on the first pass after the dispatch.
-				if (record.baselineLogSeq === null) {
-					const lastSeq = events.at(-1)?.seq;
-					executionV2.setBaseline?.(root, record.executionId, Number.isInteger(lastSeq) ? lastSeq : 0);
-					continue;
-				}
+				// The baseline was recorded before the dispatch. If it is missing, this execution was created by
+				// an older path and its turns cannot be bounded, so nothing is attributed rather than guessed.
+				if (record.baselineLogSeq === null) continue;
 				const fresh = events.filter((entry) => Number.isInteger(entry?.seq) && entry.seq > record.baselineLogSeq);
 				for (const entry of fresh) {
 					if (entry?.type === "turn/start" && Number.isInteger(entry?.data?.turn)) {
