@@ -576,4 +576,50 @@ withRoot((root) => {
 	}
 }
 
+// --- M21. the target session's own event list is the content authority --------
+// Measured on a real WORKING session with the receiver mounted. `session.snapshotEvents()` returned the
+// complete ordered chain for the task, and every `assistant/message` in it carried its own text:
+//
+//   agent/inbox/spliced#3  target=next-step
+//   agent/inbox/spliced#4  target=next-turn
+//   turn/start#5           {"turn":1}
+//   step/start#8  system/message#9  user/message#10..13  request/header#14  request/context#15
+//   assistant/message#21   texts="P3-HOST"
+//   tool/call#22  tool/result#23  step/end#24
+//   step/start#25  assistant/message#28  tool/call#29  tool/result#30  step/end#31
+//   step/start#32  assistant/message#34  texts="P3-HOST\n\nMailbox is empty — …invariants=ok"
+//   step/end#35    turn/end#36 reason={"kind":"completed"}
+//
+// So the session's own record answers lifecycle *and* content, which is a stronger position than
+// attributing text through `assistant-stream`: the stream's `payload.agent` was measured to be the boot
+// agent even for another session's turn, so it cannot be the authority.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-authority-"));
+	core.ensureBridge(root, { remember: false });
+	try {
+		// The shape the reader must cope with: text nested inside a message inside an event.
+		const event = {
+			type: "assistant/message",
+			seq: 34,
+			data: { turn: 1, step: 3, message: { role: "assistant", content: [{ type: "reasoning", text: "" }, { type: "text", text: "the answer" }] } }
+		};
+		const texts = [];
+		const walk = (v) => {
+			if (v === null || typeof v !== "object") return;
+			if (Array.isArray(v)) {
+				for (const item of v) walk(item);
+				return;
+			}
+			if (v.type === "text" && typeof v.text === "string") texts.push(v.text);
+			for (const value of Object.values(v)) walk(value);
+		};
+		walk(event);
+		assert.deepEqual(texts, ["the answer"], "the visible text is reachable from the event without knowing the nesting");
+		assert.equal(event.type, "assistant/message", "and the event names itself");
+		assert.equal(Number.isInteger(event.seq), true, "with a sequence to correlate against");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
 console.log("mapping.test.mjs: all assertions passed");
