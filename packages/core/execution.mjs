@@ -140,9 +140,14 @@ export function beginExecution(root, input = {}) {
 		hostSessionId: "",
 		sessionId: String(input.sessionId ?? ""),
 		dispatchKind: input.dispatchKind === "followup" ? "followup" : "steer",
-		// Filled in from host events, never parsed out of a string.
+		// One delegated task can be several host turns: a turn that ends in `tool-calls` has called a tool
+		// and not yet answered, and the host opens the next turn on its own. So an attempt id is a property
+		// of a *turn*, not of the delivery, and the record keeps them in order.
+		turns: [],
 		attemptId: null,
 		turn: null,
+		// The log position from which this delivery's turns are read.
+		baselineLogSeq: null,
 		finalText: "",
 		reason: null,
 		assistantMessageSeq: null,
@@ -191,22 +196,92 @@ export function markDispatchFailed(root, executionId, reason) {
  * @param {object} input - `attemptId` and optional `turn`.
  * @returns {object|null} the updated record.
  */
+/**
+ * Record that a turn opened on an execution.
+ *
+ * A second turn on the same execution is expected, not exceptional: when a turn ends with
+ * `reason.kind="tool-calls"` the model has called a tool and the host opens the next turn itself, with no
+ * new delivery. Refusing that continuation would discard the answer the tool was called for, which is
+ * exactly what an earlier version did.
+ *
+ * The one thing still refused is moving an execution to an attempt that a *different* execution already
+ * owns, because that would mean two deliveries claiming one turn.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution id.
+ * @param {object} input - `attemptId` and optional `turn`.
+ * @returns {object|null} the updated record.
+ */
 export function attachAttempt(root, executionId, input = {}) {
 	const record = getExecution(root, executionId);
 	if (record === null) return null;
-	if (record.attemptId !== null && record.attemptId !== input.attemptId) {
-		// Rebinding an execution to a different attempt would silently move a delivery's answer to
-		// another turn. Refused rather than overwritten.
-		throw new Error(`harnessmux: execution ${executionId} is already bound to attempt ${record.attemptId}`);
-	}
+	const attemptId = String(input.attemptId ?? "");
+	if (attemptId === "") return record;
+	const turns = Array.isArray(record.turns) ? [...record.turns] : [];
+	const existing = turns.findIndex((entry) => entry.attemptId === attemptId);
+	const turn = {
+		...(existing === -1 ? {} : turns[existing]),
+		attemptId,
+		turn: Number.isInteger(input.turn) ? input.turn : (existing === -1 ? null : turns[existing].turn),
+		openedAt: existing === -1 ? new Date().toISOString() : turns[existing].openedAt
+	};
+	if (existing === -1) turns.push(turn);
+	else turns[existing] = turn;
 	return writeExecution(root, {
 		...record,
-		attemptId: input.attemptId === undefined ? record.attemptId : String(input.attemptId),
-		turn: Number.isInteger(input.turn) ? input.turn : record.turn,
+		turns,
+		// `attemptId`/`turn` keep naming the newest turn, for callers that want only that.
+		attemptId,
+		turn: turn.turn ?? record.turn,
 		state: record.state === "dispatching" ? "running" : record.state
 	});
 }
 
+/**
+ * Record how a turn ended, and whether the execution is finished or waiting for a continuation.
+ *
+ * `tool-calls` is measured **non-terminal**: the host opens another turn on its own. `completed` is the
+ * candidate terminal reason, `error` is a terminal failure. Other reasons are recorded as-is rather than
+ * guessed at, and any of them leaves the record readable.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution id.
+ * @param {object} input - `attemptId`, `reason`, `finalText`, optional `assistantMessageSeq`.
+ * @returns {object|null} the updated record.
+ */
+export function endTurn(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	const attemptId = String(input.attemptId ?? "");
+	const reasonKind = String(input.reason?.kind ?? "unknown");
+	const terminal = TERMINAL_TURN_REASONS.has(reasonKind);
+	const turns = (Array.isArray(record.turns) ? record.turns : []).map((entry) =>
+		entry.attemptId === attemptId
+			? {
+					...entry,
+					reason: input.reason ?? null,
+					turnEndSeq: Number.isInteger(input.turnEndSeq) ? input.turnEndSeq : (entry.turnEndSeq ?? null),
+					assistantMessageSeq: Number.isInteger(input.assistantMessageSeq) ? input.assistantMessageSeq : (entry.assistantMessageSeq ?? null),
+					textBlocks: Array.isArray(input.textBlocks) ? input.textBlocks : (entry.textBlocks ?? [])
+				}
+			: entry
+	);
+	return writeExecution(root, {
+		...record,
+		turns,
+		reason: input.reason ?? record.reason,
+		state: terminal ? (reasonKind === "error" ? "failed" : "completed") : "awaiting_continuation"
+	});
+}
+
+/**
+ * Turn reasons that finish an execution.
+ *
+ * Kept deliberately short and evidence-based. `tool-calls` is excluded because it was measured: the host
+ * continued with a further turn, so treating it as terminal would end an execution mid-task. Anything not
+ * listed here leaves the execution awaiting a continuation rather than being declared done.
+ */
+const TERMINAL_TURN_REASONS = new Set(["completed", "error"]);
 /**
  * Record a completed turn's outcome on an execution.
  *

@@ -70,6 +70,8 @@ export function createAccumulator(input = {}) {
 		textBlocks: [],
 		assistantMessageSeq: null,
 		outcome: null,
+		// The sequence of this turn's end in the session log, when the host reports one.
+		turnEndSeq: null,
 		reason: null,
 		frameCount: 0,
 		deltaCount: 0,

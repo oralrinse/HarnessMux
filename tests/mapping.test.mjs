@@ -236,14 +236,13 @@ withRoot((root) => {
 	execution.markDispatchFailed(root, begun.executionId, "nope");
 	assert.equal(execution.staleExecutions(root, -1).length, 0, "an explained failure is not left looking unresolved");
 
-	// Rebinding an execution to a different attempt is refused rather than quietly accepted.
+	// A second attempt on one execution used to be refused. That was wrong — it is a continuation turn, and
+	// refusing it discarded a tool-calling task's answer. M20 owns that behaviour now; here the point is
+	// only that a continuation is recorded rather than silently dropped.
 	const other = execution.beginExecution(root, { deliveryId: "D8b", originMessageId: "M8b", threadId: "T8b", sessionId: "session-S8b", dispatchKind: "steer" });
 	execution.attachAttempt(root, other.executionId, { attemptId: "session-S8b:1" });
-	assert.throws(
-		() => execution.attachAttempt(root, other.executionId, { attemptId: "session-S8b:2" }),
-		/already bound to attempt/u,
-		"an execution cannot be moved to a different attempt"
-	);
+	execution.attachAttempt(root, other.executionId, { attemptId: "session-S8b:2" });
+	assert.equal(execution.getExecution(root, other.executionId).turns.length, 2, "a following turn belongs to the same execution");
 });
 
 // --- M9. text is never reconstructed from deltas -----------------------------
@@ -281,7 +280,9 @@ withRoot((root) => {
 	// an unrelated or pre-existing turn from being adopted. Resolution is by identity — see M12, which
 	// asserts the absence of the uniqueness inference this used to rely on.
 	assert.match(source, /executionForAttempt\(root, attemptId\)/u, "capture can resolve an execution already bound to the attempt");
-	assert.match(source, /not binding/u, "and refuses rather than guessing on a mismatch");
+	// `not binding` came from the attempt-mismatch refusal, which was removed on purpose: a following attempt
+	// is a continuation turn (M20), so the phrase now only appears in the unowned-frame diagnostic.
+	assert.match(source, /has no dispatched agent and no bound execution/u, "an unowned frame is still refused");
 	assert.match(source, /ctx\.on\("agent\/assistant-stream", captureAssistantFrame\)/u, "and the stream is subscribed once");
 }
 
@@ -342,8 +343,9 @@ withRoot((root) => {
 	assert.notEqual(wake, -1, "and then wakes");
 	assert.equal(registration < wake, true, "registering before the wake, because the first frame can arrive while followup is pending");
 
-	// The two-layer identity is recorded, not conflated.
-	assert.match(source, /bindHostIdentity\(root/u, "the host's own session id is frozen from the first frame");
+	// Identity is recorded, not conflated: the attempt joins the execution as a turn, and a host-side
+	// session id is never invented for it (M14 removed the derivation that used to claim one).
+	assert.match(source, /attachAttempt\(root, open\.executionId/u, "the attempt is recorded as a turn of the execution");
 	const executionSource = readFileSync(join(HERE, "..", "packages", "core", "execution.mjs"), "utf8");
 	assert.match(executionSource, /targetSessionId: String\(input\.sessionId/u, "while the delivery keeps the address it was given");
 }
@@ -406,7 +408,7 @@ withRoot((root) => {
 		"and never stores one as the host session"
 	);
 	// The attempt id itself is still recorded — it is a real host key, just not a session name.
-	assert.match(source, /bindHostIdentity\(root, open\.executionId, \{ attemptId \}\)/u, "the attempt id alone is recorded");
+	assert.match(source, /attachAttempt\(root, open\.executionId, \{ attemptId, turn: finalCapture\.turnFromAttemptId\(attemptId\) \}\)/u, "the attempt id alone is recorded, `:<n>` used only as a diagnostic turn number");
 }
 
 // --- M15. a created session is never given an invented model route ------------
@@ -522,6 +524,56 @@ withRoot((root) => {
 	const captureSource = readFileSync(join(HERE, "..", "packages", "core", "final-capture.mjs"), "utf8");
 	assert.match(captureSource, /kind === "completed"/u, "and only a completed reason counts as complete");
 	assert.match(captureSource, /hasText/u, "with text presence reported separately, so 'completed but empty' stays visible");
+}
+
+// --- M20. one delegated task is a multi-turn chain, not one attempt ----------
+// Measured on a real host: a turn ended with `reason={"kind":"tool-calls"}` and the host opened the next
+// turn by itself, with no further delivery. An earlier version refused that second attempt as an attempt
+// mismatch and therefore discarded the answer the tool was called for.
+//
+// So an attempt id belongs to a *turn*, not to the delivery: `execution.turns[]`, with `attemptId` kept
+// only as the newest one for convenience. And `tool-calls` is non-terminal, which is asserted rather than
+// left to a comment.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-multiturn-"));
+	core.ensureBridge(root, { remember: false });
+	try {
+		const ex = execution.beginExecution(root, {
+			deliveryId: "D-multi",
+			originMessageId: "M-multi",
+			threadId: "T-multi",
+			sessionId: "session-A",
+			dispatchKind: "steer"
+		});
+		execution.attachAttempt(root, ex.executionId, { attemptId: "session-X:2", turn: 2 });
+		const afterToolTurn = execution.endTurn(root, ex.executionId, { attemptId: "session-X:2", reason: { kind: "tool-calls" } });
+		assert.equal(afterToolTurn.state, "awaiting_continuation", "a tool-calling turn does not finish the execution");
+		assert.equal(afterToolTurn.turns.length, 1, "the first turn is recorded");
+
+		// The continuation turn must be accepted, not refused.
+		execution.attachAttempt(root, ex.executionId, { attemptId: "session-X:3", turn: 3 });
+		const withContinuation = execution.getExecution(root, ex.executionId);
+		assert.equal(withContinuation.turns.length, 2, "the continuation turn joins the same execution");
+		assert.deepEqual(withContinuation.turns.map((t) => t.attemptId), ["session-X:2", "session-X:3"], "in host order");
+		assert.equal(withContinuation.attemptId, "session-X:3", "while the newest attempt is still convenient to read");
+
+		const finished = execution.endTurn(root, ex.executionId, { attemptId: "session-X:3", reason: { kind: "completed" }, finalText: "the answer" });
+		assert.equal(finished.state, "completed", "a completed turn finishes it");
+
+		// An errored turn is terminal failure rather than a silent wait.
+		const failed = execution.beginExecution(root, { deliveryId: "D-err", sessionId: "session-B", dispatchKind: "followup" });
+		execution.attachAttempt(root, failed.executionId, { attemptId: "session-Y:1" });
+		const errored = execution.endTurn(root, failed.executionId, { attemptId: "session-Y:1", reason: { kind: "error", error: { message: "boom" } } });
+		assert.equal(errored.state, "failed", "an errored turn is terminal failure");
+
+		// An unrecognised reason is recorded and left awaiting, never declared done.
+		const odd = execution.beginExecution(root, { deliveryId: "D-odd", sessionId: "session-C", dispatchKind: "steer" });
+		execution.attachAttempt(root, odd.executionId, { attemptId: "session-Z:1" });
+		const oddEnd = execution.endTurn(root, odd.executionId, { attemptId: "session-Z:1", reason: { kind: "something-new" } });
+		assert.equal(oddEnd.state, "awaiting_continuation", "an unclassified reason is not treated as done");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
 }
 
 console.log("mapping.test.mjs: all assertions passed");

@@ -1490,51 +1490,45 @@ export function apply(ctx, config = {}) {
 			}
 			const open = executionV2.getExecution(root, candidate);
 			if (open === null) return;
-			if (open.attemptId !== null && open.attemptId !== attemptId) {
-				diagnoseOnChange(
-					`attempt-mismatch:${open.executionId}`,
-					attemptId,
-					`capture: frame attempt ${attemptId} does not match execution ${open.executionId}'s ${open.attemptId}; not binding`
-				);
-				return;
-			}
+			// A different attempt id is a continuation, not a conflict.
+			//
+			// Measured: a turn that ends with `reason.kind="tool-calls"` is followed by another turn the host
+			// opens by itself, with no further delivery. An earlier version refused that second attempt as a
+			// mismatch, which discarded the very answer the tool was called for. One delegated task is a
+			// multi-turn chain, so attempts are recorded as turns of the execution rather than as its identity.
 			const sessionId = open.sessionId;
 			if (sessionId === "") return;
 			const key = finalCapture.attemptKey(sessionId, attemptId);
 			let record = OPEN_ACCUMULATORS.get(key);
 			if (record === undefined) {
-				// The execution was resolved by identity above. The first frame of its attempt is where the
-				// host's own session id becomes knowable, so it is frozen onto the record here — the delivery
-				// keeps its HarnessMux address, and the host identity is recorded beside it.
-				if (open.attemptId === null) {
-					// Only the attempt id is recorded. Its leading segment is deliberately NOT taken as the
-					// session: measured on a real host, an attempt opened on one session carries the *boot*
-					// session's id as its prefix (`framePrefixMatchesCreated=false, framePrefixMatchesBoot=true`),
-					// so deriving a session from it would record a wrong one and make every later lookup wrong
-					// with it. The delivery address is already in `targetSessionId`; a host-side session id is
-					// only recorded when something authoritative provides one.
-					executionV2.bindHostIdentity(root, open.executionId, { attemptId });
-					diagnose(`capture: bound execution ${open.executionId} to host attempt ${attemptId}`);
-				}
+				// The execution was resolved by identity above, so this attempt belongs to it.
+				//
+				// Only the attempt id is recorded. Its leading segment is deliberately NOT taken as the session:
+				// measured on a real host, an attempt opened on one session carries the *boot* session's id as
+				// its prefix, so deriving a session from it would record a wrong one and make every later lookup
+				// wrong with it.
+				executionV2.attachAttempt(root, open.executionId, { attemptId, turn: finalCapture.turnFromAttemptId(attemptId) });
+				diagnose(`capture: execution ${open.executionId} turn ${attemptId}`);
 				record = finalCapture.createAccumulator({ sessionId, attemptId });
 				OPEN_ACCUMULATORS.set(key, record);
 			}
 			finalCapture.accumulateFrame(record, frame);
 
-			// A finished attempt closes its execution. The record keeps the text and the anchor; sending an
-			// answer is a later, separate step.
+			// How this turn ended decides whether the execution is finished or waiting for a continuation.
+			// The record keeps the text and the anchor; sending an answer is a later, separate step.
 			if (frame.type === "end") {
-				if (open.state !== "turn_completed" && open.state !== "replied") {
-					const verdict = finalCapture.completionOf(record);
-					executionV2.completeExecution(root, open.executionId, {
-						finalText: finalCapture.finalTextOf(record),
-						reason: record.reason,
-						assistantMessageSeq: record.assistantMessageSeq
-					});
-					diagnose(
-						`capture: attempt ${attemptId} finished reason=${verdict.reason} text=${finalCapture.finalTextOf(record).length}chars execution=${open.executionId}`
-					);
-				}
+				const verdict = finalCapture.completionOf(record);
+				const ended = executionV2.endTurn(root, open.executionId, {
+					attemptId,
+					reason: record.reason,
+					finalText: finalCapture.finalTextOf(record),
+					textBlocks: record.textBlocks,
+					assistantMessageSeq: record.assistantMessageSeq,
+					turnEndSeq: record.turnEndSeq
+				});
+				diagnose(
+					`capture: turn ${attemptId} ended reason=${verdict.reason} text=${finalCapture.finalTextOf(record).length}chars state=${ended?.state ?? "?"}turns=${ended?.turns?.length ?? "?"} execution=${open.executionId}`
+				);
 				OPEN_ACCUMULATORS.delete(key);
 			}
 		} catch (error) {
