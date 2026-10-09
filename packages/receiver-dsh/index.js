@@ -343,6 +343,12 @@ const PARAMETER_SPEC = {
 		type: "string",
 		description: "For send: your own id for this submission. Sending the same id again returns the original message instead of creating a duplicate task. Use it for anything you might retry — a pending delivery is not a failed one."
 	},
+	disposition: {
+		type: "string",
+		enum: ["progress", "question", "final"],
+		description:
+			"For reply: what this reply is in the workflow. `progress` (default) and `question` are part of working and still let the automatic final reply carry your result back; `final` marks this reply as THE result, which suppresses the automatic one so the peer receives exactly one final answer. Use `final` whenever you are answering a delegated task with its result."
+	},
 	json: { type: "boolean", description: "Return raw JSON instead of the block rendering." }
 };
 
@@ -450,6 +456,12 @@ export function apply(ctx, config = {}) {
 		: `${actor}-endpoint`;
 	// Test-only crash-injection hook (see the ack site). Empty means "never".
 	const crashAfterSteerPath = typeof config.crashAfterSteerSentinel === "string" ? config.crashAfterSteerSentinel.trim() : "";
+	// The same hook for the return leg: it simulates a process dying *after* the automatic reply was
+	// posted and *before* the execution recorded its id — the window the deterministic request id
+	// exists to close. Empty means "never", and with no sentinel file the write-back always happens.
+	const crashAfterAutoReplyPath = typeof config.crashAfterAutoReplySentinel === "string" ? config.crashAfterAutoReplySentinel.trim() : "";
+	/** Set when the crash sentinel has fired: this instance stops reconciling, as a dead process would. */
+	let autoReplyCrashObserved = false;
 	// Diagnostics: this row's `debugLog` wins, so a running app can be traced by
 	// editing the profile patch instead of relaunching with an env var.
 	//
@@ -819,6 +831,12 @@ export function apply(ctx, config = {}) {
 				if (!parent) return value(`unknown message id ${JSON.stringify(args?.id)}`);
 				const body = typeof args?.body === "string" ? args.body.trim() : "";
 				if (!body) return value("mailbox reply needs a non-empty body");
+				// What kind of reply this is, in the Commander workflow. `progress` and `question` are part of
+				// working; `final` says "this is the result", which suppresses the automatic reply so the
+				// Commander receives exactly one final answer. Defaulting to `progress` is deliberate: a
+				// forgotten flag costs a duplicate, whereas the other default would silently replace the
+				// result with a progress note.
+				const disposition = args?.disposition === "final" || args?.disposition === "question" ? String(args.disposition) : "progress";
 				const message = mailboxV2.postMessage(root, {
 					from: actor,
 					topic: parent.topic,
@@ -835,7 +853,14 @@ export function apply(ctx, config = {}) {
 				// actor makes the return leg hold however the thread is bound, and anything else
 				// posted on that thread still resolves through the binding independently.
 				const delivery = mailboxV2.enqueueDelivery(root, { messageId: message.messageId, target: { actor: peer } });
-				return value(`replied [${message.messageId}] on thread=${message.threadId}\ndelivery=${delivery.deliveryId} target=${delivery.target ? `${delivery.target.actor ?? ""}@${delivery.target.endpointId ?? "(no endpoint)"}` : "UNROUTED (awaiting a binding)"} mode=${delivery.mode}\nAddressed to ${peer} by actor, so the answer reaches the peer that asked rather than looping back here.`);
+				// Tell the workflow layer what this reply was, so a `final` one suppresses the automatic
+				// answer for the same execution. Best-effort: the reply exists either way.
+				const recorded = noteExplicitReply(sessionId, message.messageId, disposition);
+				return value(
+					`replied [${message.messageId}] on thread=${message.threadId}\ndelivery=${delivery.deliveryId} target=${delivery.target ? `${delivery.target.actor ?? ""}@${delivery.target.endpointId ?? "(no endpoint)"}` : "UNROUTED (awaiting a binding)"} mode=${delivery.mode}\n` +
+						`disposition=${disposition} recordedOnExecution=${recorded}${disposition === "final" ? " (the automatic final reply for this execution is suppressed)" : ""}\n` +
+						`Addressed to ${peer} by actor, so the answer reaches the peer that asked rather than looping back here.`
+				);
 			}
 			case "done":
 				return value("in v2 a delivery is completed by the pump (claim → steer → ack); there is nothing for the tool to consume");
@@ -1211,6 +1236,155 @@ export function apply(ctx, config = {}) {
 	}
 
 	/**
+	 * Record an explicit reply the executor sent itself, against the execution it belongs to.
+	 *
+	 * Best-effort and never fatal: an explicit reply the Commander can already read must not be undone by
+	 * a bookkeeping failure. What it buys is the P1c rule — a `final` explicit reply *is* the answer, so
+	 * the automatic one is suppressed; a `progress` or `question` reply is part of working and does not
+	 * stop the result from coming back.
+	 *
+	 * @param {string|undefined} sessionId - the session the reply was sent from.
+	 * @param {string} messageId - the posted reply.
+	 * @param {"progress"|"question"|"final"} disposition - what kind of reply this is.
+	 * @returns {boolean} true when an execution was found to record it on.
+	 */
+	function noteExplicitReply(sessionId, messageId, disposition) {
+		try {
+			if (executionV2 === null || typeof sessionId !== "string" || sessionId === "") return false;
+			const record = executionV2.outstandingExecution(root, sessionId);
+			if (record === null) return false;
+			executionV2.recordExplicitReply(root, record.executionId, { messageId, disposition });
+			if (disposition === "final") {
+				diagnose(`reply: execution ${record.executionId} has an explicit final reply ${messageId}; the automatic reply is suppressed`);
+			}
+			return true;
+		} catch (error) {
+			ctx.logger?.warn?.(`[harnessmux] could not record the explicit reply ${messageId}: ${String(error)}`);
+			return false;
+		}
+	}
+
+	/**
+	 * Send one execution's captured answer back to the Commander, exactly once.
+	 *
+	 * The route comes from the **execution** and from nowhere else. `turn`, `assistant/message`, the
+	 * stream and the current thread binding all answer "what is the result"; only the execution answers
+	 * "who asked for it". Re-deriving the destination from any of the others is how an answer ends up on
+	 * the wrong thread — or, as measured earlier, back into the session that had just produced it.
+	 *
+	 * Exactly-once is the whole design of this function:
+	 *
+	 *   1. the reply is posted under a request id derived from the execution and the answer's sequence, so
+	 *      a retry computes the same key;
+	 *   2. before posting, that key is looked up, so a reply posted by an attempt that then died is
+	 *      *found* rather than duplicated;
+	 *   3. `reply_pending` is written before the host is asked to do anything, so a crash leaves evidence
+	 *      that a reply was owed.
+	 *
+	 * @param {object} record - the execution owing a reply.
+	 * @returns {void}
+	 */
+	function ensureAutomaticReply(record) {
+		if (executionV2 === null || mailboxV2 === null) return;
+		if (!executionV2.owesAutomaticReply(record)) return;
+		const requestId = executionV2.autoReplyRequestId(record.executionId, record.finalAssistantMessageSeq);
+		if (requestId === "") return;
+
+		// A previous attempt may have posted the reply and died before recording it. The deterministic key
+		// is what turns that into "found" instead of "sent again".
+		const existing = mailboxV2.findMessageByRequestId(root, { from: actor, clientRequestId: requestId });
+		if (existing !== null) {
+			ensureReplyDelivery(existing, record);
+			executionV2.setAutomaticReply(root, record.executionId, { messageId: existing.messageId, requestId });
+			// Said out loud, with the same wording the tool uses, because this is the crash window closing:
+			// a reply had already been posted by an attempt that died before recording it, and this attempt
+			// found it rather than sending a second one.
+			diagnose(`reply: execution ${record.executionId} reconciled to the reply already posted as ${existing.messageId} duplicateSuppressed=true (${requestId})`);
+			return;
+		}
+
+		executionV2.markReplyPending(root, record.executionId, { requestId });
+		const message = mailboxV2.postMessage(root, {
+			from: actor,
+			threadId: record.threadId,
+			kind: "report",
+			replyTo: record.originMessageId === "" ? undefined : record.originMessageId,
+			clientRequestId: requestId,
+			// The body is the answer itself, byte for byte. Nothing is wrapped around it, so what the
+			// Commander reads is what the executor said and a reviewer can compare the two.
+			body: record.finalText
+		});
+		if (crashAfterAutoReplyPath !== "" && existsSync(crashAfterAutoReplyPath)) {
+			// The process is treated as gone from here on: a real crash does not get another tick, and
+			// letting this instance keep reconciling would hide the very window being tested — it would
+			// simply find its own reply on the next pass and record it.
+			autoReplyCrashObserved = true;
+			ctx.logger?.warn?.(`[harnessmux] crash-after-auto-reply sentinel present: reply ${message.messageId} is posted and deliberately unrecorded on execution ${record.executionId}`);
+			diagnose(`reply: sentinel present, leaving execution ${record.executionId} at reply_pending with reply ${message.messageId} unrecorded on purpose`);
+			return;
+		}
+		ensureReplyDelivery(message, record);
+		executionV2.setAutomaticReply(root, record.executionId, { messageId: message.messageId, requestId });
+		diagnose(`reply: execution ${record.executionId} answered as ${message.messageId} on thread ${record.threadId} for ${record.originActor} seq=${record.finalAssistantMessageSeq}`);
+	}
+
+	/**
+	 * Make sure a posted reply has a delivery addressed to the actor that asked.
+	 *
+	 * Split out because the crash window has two edges: a reply can be posted without its delivery, and
+	 * that is repaired here rather than by posting a second message. The route is the execution's
+	 * `originActor`, addressed by actor exactly as the explicit reply path does, so the answer reaches the
+	 * peer that asked instead of following the thread binding back into this harness.
+	 *
+	 * @param {object} message - the posted reply.
+	 * @param {object} record - the execution it answers.
+	 * @returns {object|null} the delivery, existing or created.
+	 */
+	function ensureReplyDelivery(message, record) {
+		try {
+			const known = mailboxV2
+				.listDeliveries(root, "queued")
+				.concat(mailboxV2.listDeliveries(root, "claimed"), mailboxV2.listDeliveries(root, "acked"))
+				.find((row) => row.messageId === message.messageId);
+			if (known !== undefined) return known;
+			// Advisory: this is a result travelling back, not work being handed out. Naming the mode keeps a
+			// peer's pump from treating the answer as delegated work it must execute.
+			return mailboxV2.enqueueDelivery(root, { messageId: message.messageId, target: { actor: record.originActor }, mode: "advisory" });
+		} catch (error) {
+			ctx.logger?.warn?.(`[harnessmux] could not enqueue the reply delivery for ${message.messageId}: ${String(error)}`);
+			return null;
+		}
+	}
+
+	/**
+	 * Send every captured answer that is owed and not yet sent.
+	 *
+	 * Run on the watcher tick rather than only at the moment the turn ends, because the moment the turn
+	 * ends is exactly the moment a crash loses: the record on disk is the only thing a restart has, and
+	 * `pendingAutoReplies` reads it from there. It also means a reply is retried when the failure was
+	 * transient without anything having to remember that it failed.
+	 *
+	 * @returns {void}
+	 */
+	function reconcileAutoReplies() {
+		try {
+			if (executionV2 === null || mailboxV2 === null) return;
+			if (autoReplyCrashObserved) return;
+			for (const record of executionV2.pendingAutoReplies(root)) {
+				try {
+					ensureAutomaticReply(record);
+				} catch (error) {
+					// One unanswerable execution must not stop the others from being answered.
+					ctx.logger?.warn?.(`[harnessmux] could not send the automatic reply for ${record.executionId}: ${String(error)}`);
+					diagnose(`reply: execution ${record.executionId} could not be answered: ${String(error?.message ?? error)}`);
+				}
+			}
+		} catch (error) {
+			ctx.logger?.warn?.(`[harnessmux] automatic reply reconciliation failed: ${String(error)}`);
+		}
+	}
+
+	/**
 	 * The open turn of a session that a delegated round cannot claim, if there is one.
 	 *
 	 * This is the ownership rule expressed once, so that both hand-offs obey the same decision: a
@@ -1425,8 +1599,11 @@ export function apply(ctx, config = {}) {
 						// Live agents first, then published-but-unloaded sessions: the second group is
 						// what makes an idle, user-visible session wakeable at all.
 						for (const agent of agents) pumpV2(agent);
-			// Turn lifecycle is read from the target sessions themselves, not from stream metadata.
-			watchSessionLogs();
+						// Turn lifecycle is read from the target sessions themselves, not from stream metadata.
+						watchSessionLogs();
+						// The return leg: any captured answer that is owed and not yet sent. Reading it from
+						// the store rather than from the sessions is what makes it survive a restart.
+						reconcileAutoReplies();
 						for (const candidate of pumpCandidates()) {
 							if (candidate.status === "unloaded") pumpV2(candidate);
 						}
@@ -1581,6 +1758,10 @@ export function apply(ctx, config = {}) {
 						);
 						continue;
 					}
+					// A turn already closed once is not re-closed. Completed executions stay in the watcher's
+					// list until their reply has gone out, so without this guard every tick would re-run the
+					// same ending and rewrite the record — and re-derive the same answer — forever.
+					if ((record.turns.find((followed) => followed.turn === turn)?.turnEndSeq ?? null) !== null) continue;
 					const reasonKind = String(entry?.data?.reason?.kind ?? "unknown");
 					const ended = executionV2.endTurn(root, record.executionId, { turn, reason: entry?.data?.reason, turnEndSeq: entry.seq });
 					diagnose(`log: execution ${record.executionId} turn ${turn} end#${entry.seq} reason=${reasonKind} state=${ended?.state ?? "?"}`);
@@ -1594,7 +1775,14 @@ export function apply(ctx, config = {}) {
 						continue;
 					}
 					executionV2.setFinalAnswer(root, record.executionId, { finalText: answer.text, assistantMessageSeq: answer.seq, turn });
-					diagnose(`log: execution ${record.executionId} final turn=${turn} seq=${answer.seq} text=${answer.text.length}chars`);
+					// The executor may have sent the result itself while it worked; now that the turn is over,
+					// that reply is the return leg and the record says so.
+					if (record.explicitFinalReplyMessageId !== null && record.explicitFinalReplyMessageId !== undefined) {
+						executionV2.markRepliedExplicitly(root, record.executionId);
+						diagnose(`log: execution ${record.executionId} was answered by the executor (${record.explicitFinalReplyMessageId}); no automatic reply is owed`);
+					} else {
+						diagnose(`log: execution ${record.executionId} final turn=${turn} seq=${answer.seq} text=${answer.text.length}chars`);
+					}
 				}
 			}
 		} catch (error) {

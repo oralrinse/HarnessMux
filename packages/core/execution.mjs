@@ -43,11 +43,27 @@ const EXECUTION_DIR = "executions";
 /**
  * States an execution may be in.
  *
- * `dispatching` is written before the hand-off; `running` once the host accepted it; `turn_completed`
- * once the turn ended; `replied` once an answer was sent. `dispatch_failed` is separate from every
- * running state on purpose.
+ * `dispatching` is written before the hand-off; `running` once the host accepted it; `completed` once
+ * the turn ended successfully; `reply_pending` once an automatic reply is owed but has not been
+ * *recorded* as sent; `replied` once the answer has left for the Commander. `failed` is a turn that
+ * ended in error, and `dispatch_failed` is separate from every running state on purpose.
+ *
+ * `completed` and `replied` are deliberately distinct states rather than one flag with a nullable id.
+ * "The executor finished" and "the Commander has the result" are different facts, and a Commander or a
+ * `doctor` run has to be able to tell a stuck executor from a finished one whose return leg never
+ * landed — which is exactly the window `reply_pending` names.
  */
-export const EXECUTION_STATES = ["dispatching", "running", "turn_completed", "replied", "dispatch_failed"];
+export const EXECUTION_STATES = ["dispatching", "running", "completed", "reply_pending", "replied", "failed", "dispatch_failed"];
+
+/**
+ * States in which an execution is still this session's outstanding work.
+ *
+ * A completed-but-unreplied execution is still outstanding *for the return leg*: turns are over, but
+ * nothing has answered the Commander, so it stays visible to the log watcher and to the reply
+ * reconciler. It cannot be mistaken for an owned open turn, because `ownsOpenTurn` requires a turn
+ * whose `turnEndSeq` is still null.
+ */
+const OUTSTANDING_STATES = ["dispatching", "running", "completed", "reply_pending"];
 
 /**
  * Path for one execution record.
@@ -155,11 +171,85 @@ export function beginExecution(root, input = {}) {
 		turn: null,
 		reason: null,
 		assistantMessageSeq: null,
-		explicitReplyMessageId: null,
+		// The return leg. `automaticReplyMessageId` is the message that answered the Commander on this
+		// delivery's thread, and it is the field that makes the reply exactly-once: a reply posted but
+		// not yet recorded here is re-discovered by its deterministic request id rather than re-sent.
 		automaticReplyMessageId: null,
+		automaticReplyRequestId: null,
+		// Explicit replies the executor sent itself while it worked. A `final` one suppresses the
+		// automatic reply, because that answer *is* the final answer; a `progress` or `question` one
+		// does not, because the Commander still needs the result at the end.
+		explicitReplyMessageIds: [],
+		explicitFinalReplyMessageId: null,
+		explicitReplyMessageId: null,
 		createdAt: now,
 		updatedAt: now
 	});
+}
+
+/**
+ * The deterministic idempotency key for one execution's automatic reply.
+ *
+ * Deterministic on purpose, and derived from facts that cannot change after the fact: the execution and
+ * the assistant message the answer came from. It is what closes the crash window between "the reply
+ * was posted" and "the execution records that it was posted" — a second attempt computes the *same*
+ * key, `findMessageByRequestId` finds the message that already exists, and nothing is sent twice.
+ *
+ * A random id here would turn every crash into a second reply to the Commander, which is the failure
+ * this whole layer exists to avoid.
+ *
+ * @param {string} executionId - the execution.
+ * @param {number} finalAssistantMessageSeq - the session sequence of the message that carries the answer.
+ * @returns {string} the request id, or an empty string when either input is missing.
+ */
+export function autoReplyRequestId(executionId, finalAssistantMessageSeq) {
+	const id = String(executionId ?? "").trim();
+	if (id === "" || !Number.isInteger(finalAssistantMessageSeq)) return "";
+	return `auto-final:${id}:${finalAssistantMessageSeq}`;
+}
+
+/**
+ * Whether an execution owes the Commander an automatic reply.
+ *
+ * Deliberately strict, and deliberately not a guess. Only a turn the host itself reported as
+ * `completed`, holding a real answer that came from a named message, and with no reply recorded yet,
+ * qualifies. Everything else is left as a diagnosable state rather than answered:
+ *
+ *   - `completed` with no visible text is a distinct outcome, and an empty message must never be sent;
+ *   - an `error` turn must not be dressed up as a result;
+ *   - an unknown terminal reason is not evidence of success;
+ *   - an execution whose answer the executor already sent itself as a `final` explicit reply does not
+ *     owe another one — that answer *is* the answer.
+ *
+ * @param {object} record - the execution.
+ * @returns {boolean} true when this execution's answer should be sent back automatically.
+ */
+export function owesAutomaticReply(record) {
+	if (record === null || typeof record !== "object") return false;
+	if (record.state !== "completed" && record.state !== "reply_pending") return false;
+	if (record.reason?.kind !== "completed") return false;
+	if (typeof record.finalText !== "string" || record.finalText.trim() === "") return false;
+	if (!Number.isInteger(record.finalAssistantMessageSeq)) return false;
+	if (record.automaticReplyMessageId !== null && record.automaticReplyMessageId !== undefined) return false;
+	if (record.explicitFinalReplyMessageId !== null && record.explicitFinalReplyMessageId !== undefined) return false;
+	if (typeof record.threadId !== "string" || record.threadId === "") return false;
+	if (typeof record.originActor !== "string" || record.originActor === "") return false;
+	return true;
+}
+
+/**
+ * Every execution whose answer is owed but not yet recorded as sent.
+ *
+ * A query rather than a filter inside the log watcher, because the watcher only ever visits sessions it
+ * can still see: after a restart, or once a session has been unloaded, the owed replies are exactly the
+ * records that no watcher will look at. Reading them from the store is what makes the reconciliation
+ * survive a crash.
+ *
+ * @param {string} root - bridge root.
+ * @returns {object[]} the executions owing a reply, oldest first.
+ */
+export function pendingAutoReplies(root) {
+	return listExecutions(root).filter((record) => owesAutomaticReply(record));
 }
 
 /**
@@ -401,6 +491,103 @@ export function setFinalAnswer(root, executionId, input = {}) {
 	});
 }
 /**
+ * Record that this execution's answer is owed and not yet sent.
+ *
+ * Written **before** the reply is posted, so a crash between posting and recording leaves a record that
+ * says "a reply was owed here", and the deterministic request id makes the retry find the message
+ * instead of duplicating it.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @param {object} [input] - `requestId`, the deterministic key the reply will be posted under.
+ * @returns {object|null} the updated record.
+ */
+export function markReplyPending(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	return writeExecution(root, {
+		...record,
+		state: "reply_pending",
+		automaticReplyRequestId: typeof input.requestId === "string" && input.requestId !== "" ? input.requestId : record.automaticReplyRequestId
+	});
+}
+
+/**
+ * Record the message that answered the Commander, completing the return leg.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @param {object} input - `messageId`, optional `requestId`.
+ * @returns {object|null} the updated record.
+ */
+export function setAutomaticReply(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	const messageId = String(input.messageId ?? "");
+	if (messageId === "") return record;
+	return writeExecution(root, {
+		...record,
+		state: "replied",
+		automaticReplyMessageId: messageId,
+		automaticReplyRequestId: typeof input.requestId === "string" && input.requestId !== "" ? input.requestId : record.automaticReplyRequestId
+	});
+}
+
+/**
+ * Record an explicit reply the executor sent itself.
+ *
+ * `disposition` is the tool-level semantic, not a protocol kind: `progress` and `question` replies are
+ * part of working and must not stop the result from coming back, while a `final` reply *is* the result
+ * and therefore suppresses the automatic one. Recording the first explicit reply separately as well
+ * keeps the older `explicitReplyMessageId` field meaningful.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @param {object} input - `messageId` and `disposition` (`progress` | `question` | `final`).
+ * @returns {object|null} the updated record.
+ */
+export function recordExplicitReply(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	const messageId = String(input.messageId ?? "");
+	if (messageId === "") return record;
+	const disposition = input.disposition === "final" || input.disposition === "question" ? input.disposition : "progress";
+	const ids = Array.isArray(record.explicitReplyMessageIds) ? [...record.explicitReplyMessageIds] : [];
+	if (ids.includes(messageId)) return record;
+	ids.push(messageId);
+	// A `final` reply *is* the answer, so once the turn is over the return leg is done — it simply did not
+	// travel through this layer. Recording it as `replied` is what keeps "the work is finished" and "the
+	// Commander has the result" distinguishable when the executor answered by hand.
+	const answeredByHand = disposition === "final" && (record.state === "completed" || record.state === "reply_pending");
+	return writeExecution(root, {
+		...record,
+		explicitReplyMessageIds: ids,
+		explicitReplyMessageId: record.explicitReplyMessageId ?? messageId,
+		explicitFinalReplyMessageId: disposition === "final" ? messageId : (record.explicitFinalReplyMessageId ?? null),
+		...(answeredByHand ? { state: "replied" } : {})
+	});
+}
+
+/**
+ * Mark the return leg complete for an execution the executor answered itself.
+ *
+ * Needed for the other ordering: the explicit reply is sent *during* the turn, so the record is still
+ * `running` when it is recorded, and there is nothing to promote until the turn ends. Called from the
+ * completion path, and idempotent.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution.
+ * @returns {object|null} the updated record.
+ */
+export function markRepliedExplicitly(root, executionId) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	if (record.explicitFinalReplyMessageId === null || record.explicitFinalReplyMessageId === undefined) return record;
+	if (record.state === "replied") return record;
+	return writeExecution(root, { ...record, state: "replied" });
+}
+
+/**
  * Record a completed turn's outcome on an execution.
  *
  * @param {string} root - bridge root.
@@ -413,7 +600,7 @@ export function completeExecution(root, executionId, input = {}) {
 	if (record === null) return null;
 	return writeExecution(root, {
 		...record,
-		state: "turn_completed",
+		state: "completed",
 		finalText: String(input.finalText ?? ""),
 		reason: input.reason ?? null,
 		assistantMessageSeq: Number.isInteger(input.assistantMessageSeq) ? input.assistantMessageSeq : record.assistantMessageSeq
@@ -434,7 +621,9 @@ export function completeExecution(root, executionId, input = {}) {
 export function staleExecutions(root, staleMs = 300_000) {
 	const cutoff = Date.now() - staleMs;
 	return listExecutions(root).filter((record) => {
-		if (record.state === "replied" || record.state === "dispatch_failed") return false;
+		// Explained outcomes are not unresolved work: a reply that went out, a hand-off that failed, and a
+		// turn the host reported as errored all have an answer already.
+		if (record.state === "replied" || record.state === "dispatch_failed" || record.state === "failed") return false;
 		const at = Date.parse(record.updatedAt ?? record.createdAt ?? "");
 		return Number.isFinite(at) ? at < cutoff : false;
 	});
@@ -452,9 +641,7 @@ export function staleExecutions(root, staleMs = 300_000) {
  * @returns {object|null} the outstanding record, or null.
  */
 export function outstandingExecutions(root) {
-	const live = listExecutions(root).filter(
-		(record) => record.state === "dispatching" || record.state === "running" || record.state === "turn_completed"
-	);
+	const live = listExecutions(root).filter((record) => OUTSTANDING_STATES.includes(record.state));
 	return live;
 }
 
@@ -498,9 +685,7 @@ export function bindHostIdentity(root, executionId, input = {}) {
  * @returns {object|null} the outstanding record, or null.
  */
 export function outstandingExecution(root, sessionId) {
-	const live = listExecutions(root).filter(
-		(record) => record.sessionId === sessionId && (record.state === "dispatching" || record.state === "running" || record.state === "turn_completed")
-	);
+	const live = listExecutions(root).filter((record) => record.sessionId === sessionId && OUTSTANDING_STATES.includes(record.state));
 	return live.length === 0 ? null : live[live.length - 1];
 }
 

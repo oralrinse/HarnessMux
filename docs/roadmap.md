@@ -113,8 +113,13 @@ may wake a session. Advisory work and unbound deliveries behave exactly as befor
 is still legal and nothing is ever guessed. `watchIntervalMs` sets the worst-case wake latency
 (2 s by default).
 
-Still open from this stage: automatic capture of the final assistant text (the reply path is
-currently the model's own tool call), and the Codex-side lifecycle re-check.
+Closed by measurement since: the turn boundary and the final assistant text
+([REPORT-commander-mode.md](REPORT-commander-mode.md) — a delegated delivery to an idle session opens its
+own turn, and the answer is the last text-bearing `assistant/message` inside the completed turn), and the
+automatic return of that answer ([REPORT-automatic-reply.md](REPORT-automatic-reply.md) — the captured
+text is posted back on the origin thread under a deterministic request id, exactly once, including across
+the crash window). Still open: the Codex-side lifecycle re-check, and delivery-level restart
+reconciliation (P1d).
 
 ### P4.5 — Visible Executor Mode *(recon complete, implementation not started)*The gap this closes: a delegated task today waits for a human to give DSH a turn.
 
@@ -134,7 +139,7 @@ Still open before implementation may start:
 
 | # | Unknown | Why it blocks |
 | --- | --- | --- |
-| 1 | the in-process accessor for the final assistant text (`readSurface()` returned no events) | the automatic return of a result depends on it |
+| 1 | ~~the in-process accessor for the final assistant text~~ **resolved by measurement** | the session's own event list carries it: `session.log`, `snapshotEvents()` and the durable `seq`/`eventAt` range were measured to hold identical events, and the capture reads the last text-bearing `assistant/message` inside the completed turn |
 | 2 | what happens if the user opens the Executor session while a delegated turn runs (writer lock) | it is the one interaction that could surprise a user |
 
 Blocked in practice by an adapter defect recorded below: the Codex MCP server and hooks name node by

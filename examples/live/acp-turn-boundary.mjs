@@ -393,6 +393,120 @@ function deliverDelegated(paths, sessionId, { topic, body, mode = "delegated" })
 	return { messageId: sent.message.messageId, threadId: sent.message.threadId, deliveryId: delivered.deliveryId };
 }
 
+/** All messages on the bridge. */
+const messagesOf = (paths) => cli(paths, ["messages"]) ?? [];
+
+/** Every automatic reply the receiver has posted, oldest first. */
+const automaticReplies = (paths) => messagesOf(paths).filter((message) => message.from === "dsh" && String(message.clientRequestId ?? "").startsWith("auto-final:"));
+
+/**
+ * Check the explicit route: the executor answered the Commander itself with `disposition=final`.
+ *
+ * The assertions are the same facts as the automatic route — right thread, right parent, right actor,
+ * exactly one logical answer — because the contract is about the Commander receiving one answer, not
+ * about which code path carried it. What differs is what must be *absent*: no automatic reply.
+ *
+ * @param {object} paths - this run's paths.
+ * @param {object} origin - `{ messageId, threadId }` of the delegated delivery.
+ * @param {object|null} record - the execution.
+ * @returns {object} the evidence and the failed assertions.
+ */
+function checkExplicitReturnLeg(paths, origin, record) {
+	const fromHarness = messagesOf(paths).filter((message) => message.from === "dsh");
+	const reply = fromHarness.length === 0 ? null : fromHarness[fromHarness.length - 1];
+	const delivery = reply === null ? null : findDeliveryFor(paths, reply.messageId);
+	const assertions = {
+		"the execution records an explicit final reply": record !== null && record.explicitFinalReplyMessageId !== null,
+		"no automatic reply was posted": record !== null && record.automaticReplyMessageId === null,
+		"the automatic path posted nothing at all": automaticReplies(paths).length === 0,
+		"the executor's reply is on the thread the work arrived on": reply !== null && reply.threadId === origin.threadId,
+		"the executor's reply answers the message that asked": reply !== null && reply.replyTo === origin.messageId,
+		"the executor's reply is addressed to the actor that asked": delivery !== null && delivery.target?.actor === "codex",
+		"exactly one logical answer exists for this execution": fromHarness.length === 1,
+		"the execution's return leg is complete": record !== null && record.state === "replied",
+		"protocol invariants hold": (cli(paths, ["verify"])?.ok ?? false) === true
+	};
+	const failed = Object.entries(assertions).filter(([, passed]) => passed !== true).map(([name]) => name);
+	return {
+		route: "explicit",
+		reply: reply === null ? null : { messageId: reply.messageId, threadId: reply.threadId, replyTo: reply.replyTo ?? null, from: reply.from, kind: reply.kind },
+		delivery: delivery === null ? null : { deliveryId: delivery.deliveryId, target: delivery.target, mode: delivery.mode, state: delivery.state },
+		counts: { automaticReplies: automaticReplies(paths).length, explicitAnswers: fromHarness.length },
+		assertions,
+		failed
+	};
+}
+
+/**
+ * Check the return leg of one delegated round against the Commander contract.
+ *
+ * Every assertion is about a fact on the bridge, not about a log line: the reply has to exist, be on the
+ * thread the work arrived on, answer the very message that asked, be addressed to the actor that asked,
+ * carry the captured answer byte for byte, and be the *only* logical reply for that execution.
+ *
+ * @param {object} paths - this run's paths.
+ * @param {object} origin - `{ messageId, threadId, deliveryId }` of the delegated delivery.
+ * @param {object|null} record - the execution that answered it.
+ * @returns {object} the evidence and the failed assertions.
+ */
+function checkReturnLeg(paths, origin, record) {
+	const replies = automaticReplies(paths);
+	const all = messagesOf(paths);
+	const mine = record === null ? [] : replies.filter((message) => String(message.clientRequestId ?? "").endsWith(`:${record.finalAssistantMessageSeq}`) && String(message.clientRequestId ?? "").includes(record.executionId));
+	const reply = mine.length === 0 ? null : mine[mine.length - 1];
+	const delivery = reply === null ? null : findDeliveryFor(paths, reply.messageId);
+	const assertions = {
+		"a reply exists": reply !== null,
+		"one logical reply for this execution": mine.length === 1,
+		"reply is on the thread the work arrived on": reply !== null && reply.threadId === origin.threadId,
+		"reply answers the message that asked": reply !== null && reply.replyTo === origin.messageId,
+		"reply comes from this harness": reply !== null && reply.from === "dsh",
+		"reply is addressed to the actor that asked": delivery !== null && delivery.target?.actor === "codex",
+		"reply is not routed to a session": delivery !== null && delivery.target?.sessionId === undefined,
+		"reply body is the captured answer, byte for byte": reply !== null && record !== null && reply.body === record.finalText,
+		"the execution records the reply as sent": record !== null && record.automaticReplyMessageId === (reply?.messageId ?? null),
+		"the execution's return leg is complete": record !== null && record.state === "replied",
+		"protocol invariants hold": (cli(paths, ["verify"])?.ok ?? false) === true
+	};
+	const failed = Object.entries(assertions).filter(([, passed]) => passed !== true).map(([name]) => name);
+	return {
+		route: "automatic",
+		reply: reply === null ? null : { messageId: reply.messageId, threadId: reply.threadId, replyTo: reply.replyTo ?? null, from: reply.from, clientRequestId: reply.clientRequestId ?? null, bodyLength: reply.body.length },
+		delivery: delivery === null ? null : { deliveryId: delivery.deliveryId, target: delivery.target, mode: delivery.mode, state: delivery.state },
+		counts: { automaticReplies: replies.length, logicalRepliesForExecution: mine.length, allMessages: all.length },
+		assertions,
+		failed
+	};
+}
+
+/**
+ * The delivery that carries one message, from whichever state it is in.
+ *
+ * The CLI has no "find the delivery for this message" verb, so the three delivery directories are read
+ * directly. They are the same store the receiver uses, and the shape is the protocol's own.
+ *
+ * @param {object} paths - this run's paths.
+ * @param {string} messageId - the message to find a delivery for.
+ * @returns {object|null} the delivery row, with its `state`, or null.
+ */
+function findDeliveryFor(paths, messageId) {
+	const candidates = [];
+	for (const [dir, state] of [["queue", "queued"], ["claims", "claimed"], ["acks", "acked"]]) {
+		const base = join(paths.bridge, dir);
+		if (!existsSync(base)) continue;
+		for (const name of readdirSync(base)) {
+			if (!name.endsWith(".json")) continue;
+			try {
+				const row = JSON.parse(readFileSync(join(base, name), "utf8"));
+				if (row.messageId === messageId) candidates.push({ ...row, state });
+			} catch {
+				// Mid-write: the next poll sees it complete.
+			}
+		}
+	}
+	return candidates.length === 0 ? null : candidates[0];
+}
+
 /** The compact per-delivery summary printed as the run proceeds. */
 function describeExecution(record) {
 	if (record === null || record === undefined) return "no execution record";
@@ -404,6 +518,9 @@ async function main() {
 	const profile = arg("profile", "acp");
 	const rounds = Number(arg("rounds", "3"));
 	const settleMs = Number(arg("settle", "8000"));
+	// `auto` exercises the automatic reply (P1b); `explicit` exercises an executor sending the result
+	// itself with `disposition=final`, which must suppress the automatic one (P1c).
+	const replyMode = arg("reply-mode", arg("replyMode", "auto")) === "explicit" ? "explicit" : "auto";
 	const prompt1 = arg("prompt1", "Reply with exactly the text PROMPT_ONE_OK and nothing else.");
 	const paths = newLab();
 	const report = { lab: paths.base, mode, profile, repo: REPO, steps: [] };
@@ -461,9 +578,14 @@ async function main() {
 				const logBefore = eventsOf(before, sessionId, "log");
 				const sinceSeq = logBefore.length === 0 ? -1 : logBefore[logBefore.length - 1].seq;
 				const marker = `ROUND_${round}`;
-				const body = `${marker}_TASK: This is a delegated task. Reply with exactly the text ${marker}_DONE and nothing else.`;
+				// Which return path the round is meant to exercise. The task text decides it, so the run
+				// tests the route it claims to test instead of whatever the model happened to choose.
+				const body =
+					replyMode === "explicit"
+						? `${marker}_TASK: This is a delegated task. Send the reply to the commander yourself with the mailbox reply tool, using disposition=final, with the exact body ${marker}_DONE.`
+						: `${marker}_TASK: This is a delegated task. Answer with exactly the text ${marker}_DONE as your final visible answer, and do not use the mailbox tool in this round.`;
 				const delivered = deliverDelegated(paths, sessionId, { topic: `turn-boundary-${round}`, body });
-				const step = { step: `delivery-${round}`, marker, idleBefore: openTurnOf(logBefore), sinceSeq, ...delivered };
+				const step = { step: `delivery-${round}`, marker, replyMode, idleBefore: openTurnOf(logBefore), sinceSeq, ...delivered };
 				const outcome = await until(
 					`delivery-${round}`,
 					() => {
@@ -482,8 +604,75 @@ async function main() {
 				step.execution = executions(paths).find((candidate) => candidate.deliveryId === delivered.deliveryId) ?? null;
 				step.deliveryState = cli(paths, ["state", delivered.deliveryId]);
 				step.digest = digest(readProbe(paths), sessionId, { sinceSeq, sinceEventCount: logBefore.length });
+				// The return leg: the captured answer has to travel back, once, by the route this round asks for.
+				step.returnLeg = replyMode === "explicit" ? checkExplicitReturnLeg(paths, delivered, step.execution) : checkReturnLeg(paths, delivered, step.execution);
 				report.steps.push(step);
-				process.stdout.write(`acp-turn-boundary: round ${round} ownTurns=${JSON.stringify(step.digest.newTurnStarts)} acked=${step.deliveryState?.state}/${step.deliveryState?.note} ${describeExecution(step.execution)}\n`);
+				process.stdout.write(
+					`acp-turn-boundary: round ${round} ownTurns=${JSON.stringify(step.digest.newTurnStarts)} ${describeExecution(step.execution)}\n` +
+						`acp-turn-boundary: round ${round} returnLeg failed=${JSON.stringify(step.returnLeg.failed)} counts=${JSON.stringify(step.returnLeg.counts)}\n`
+				);
+			}
+
+			if (mode === "reply-crash") {
+				// The window that matters: the reply is posted, the process dies before the execution records
+				// it, and a later reconciliation has only the store to go on.
+				//
+				// What is real here is the durable state — a reply message that exists under the execution's
+				// deterministic request id, and an execution record that does not know about it. That is
+				// byte-for-byte what a crash leaves behind, and it is what the reconciler reads. What is
+				// simulated is the death itself: the record is rewritten by this probe instead of by a
+				// kill. The in-process half (a fresh receiver instance over the same store) is covered by
+				// tests/auto-reply.test.mjs A6, which mounts the receiver twice.
+				const last = [...report.steps].reverse().find((entry) => String(entry.step ?? "").startsWith("delivery-"));
+				const step = { step: "reply-crash" };
+				if (last === undefined || last.execution?.automaticReplyMessageId == null) {
+					step.note = "no automatic reply exists to crash on; run with --rounds 1 in the same invocation";
+					step.failed = ["no automatic reply to test the crash window with"];
+				} else {
+					const recordPath = join(paths.bridge, "executions", `${last.execution.executionId}.json`);
+					const before = JSON.parse(readFileSync(recordPath, "utf8"));
+					const replyId = before.automaticReplyMessageId;
+					const repliesBefore = automaticReplies(paths).length;
+					writeFileSync(
+						recordPath,
+						`${JSON.stringify({ ...before, state: "reply_pending", automaticReplyMessageId: null, automaticReplyRequestId: null }, null, 2)}\n`,
+						"utf8"
+					);
+					// The receiver's own reconciliation, on its own tick: nothing is poked from here.
+					const reconciled = await until(
+						"reply-reconcile",
+						() => {
+							const now = JSON.parse(readFileSync(recordPath, "utf8"));
+							return { done: now.automaticReplyMessageId !== null, value: now };
+						},
+						30_000,
+						500
+					);
+					const after = reconciled.value ?? JSON.parse(readFileSync(recordPath, "utf8"));
+					const repliesAfter = automaticReplies(paths);
+					const suppressed = receiverTrace(paths).filter((line) => line.includes("duplicateSuppressed=true"));
+					step.crashWindow = {
+						executionId: after.executionId,
+						replyPostedBeforeCrash: replyId,
+						recordStateDuringCrash: "reply_pending",
+						reconciledMessageId: after.automaticReplyMessageId,
+						recordStateAfter: after.state,
+						automaticRepliesBefore: repliesBefore,
+						automaticRepliesAfter: repliesAfter.length,
+						duplicateSuppressedTrace: suppressed.slice(-2)
+					};
+					step.assertions = {
+						"the reply existed before the crash": repliesBefore >= 1,
+						"reconciliation recorded a message": after.automaticReplyMessageId !== null,
+						"it is the same message, not a new one": after.automaticReplyMessageId === replyId,
+						"no second logical reply was posted": repliesAfter.length === repliesBefore,
+						"the execution's return leg is complete again": after.state === "replied",
+						"the trace records the suppressed duplicate": suppressed.length > 0
+					};
+					step.failed = Object.entries(step.assertions).filter(([, passed]) => passed !== true).map(([name]) => name);
+				}
+				report.steps.push(step);
+				process.stdout.write(`acp-turn-boundary: reply-crash ${JSON.stringify(step.crashWindow ?? step.note)}\nfailed=${JSON.stringify(step.failed)}\n`);
 			}
 
 			if (mode === "contended") {
@@ -589,7 +778,10 @@ async function main() {
 				turns: record.turns,
 				finalTurn: record.finalTurn,
 				finalAssistantMessageSeq: record.finalAssistantMessageSeq,
-				finalText: record.finalText
+				finalText: record.finalText,
+				automaticReplyMessageId: record.automaticReplyMessageId,
+				automaticReplyRequestId: record.automaticReplyRequestId,
+				explicitFinalReplyMessageId: record.explicitFinalReplyMessageId
 			}));
 			report.notes = host.notes.slice(0, 40);
 			report.hostExit = host.exitInfo;
@@ -603,6 +795,15 @@ async function main() {
 	}
 
 	writeFileSync(paths.summary, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+	// The assertions are the acceptance gate, not decoration: a failed one has to fail the run, or a
+	// green-looking probe would be indistinguishable from a passing one.
+	const failures = report.steps.flatMap((entry) => (entry.failed ?? []).map((name) => `${entry.step}: ${name}`));
+	report.failures = failures;
+	writeFileSync(paths.summary, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+	if (failures.length > 0) {
+		process.stdout.write(`acp-turn-boundary: FAILED ${failures.length} assertion(s):\n${failures.map((name) => `  - ${name}`).join("\n")}\n`);
+		process.exitCode = 1;
+	}
 	process.stdout.write(`acp-turn-boundary: summary -> ${paths.summary}\n`);
 }
 

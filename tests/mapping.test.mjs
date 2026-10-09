@@ -97,7 +97,12 @@ withRoot((root) => {
 	assert.equal(found.originActor, "codex", "and to the actor waiting for the answer");
 	assert.equal(found.finalText, "FINAL_CAPTURE", "with the final text attached");
 	assert.equal(found.assistantMessageSeq, 28, "and the persisted message anchor");
-	assert.equal(found.state, "turn_completed", "and a state that is not yet 'replied'");
+	// `completed` is the state a finished turn writes. It used to be `turn_completed` here and `completed`
+	// in `endTurn`, so the exported vocabulary and the written one disagreed; the return leg made that
+	// expensive, because "the work is done" and "the answer has been sent" now have to be told apart.
+	assert.equal(found.state, "completed", "and a state that is not yet 'replied'");
+	assert.equal(execution.EXECUTION_STATES.includes("completed"), true, "the exported state list names the state that is actually written");
+	assert.equal(execution.EXECUTION_STATES.includes("reply_pending"), true, "and the return leg's own state");
 });
 
 // --- M2. a running session dispatched with steer maps correctly ---------------

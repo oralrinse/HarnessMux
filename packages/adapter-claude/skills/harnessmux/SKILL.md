@@ -50,6 +50,19 @@ record messageId + deliveryId
 ask the user whether to continue ordinary implementation, testing, debugging, evidence-gathering or
 review work — decide and continue.
 
+### The executor's result comes back to you automatically
+
+When a delegated round finishes, HarnessMux sends the executor's final visible text back to you itself: a
+new message on the thread you sent the task on, `from dsh`, `replyTo` the message that asked, addressed to
+you by actor. You do not have to ask for it, and you should not treat its arrival as an extra round — it
+is the answer to the round you already sent. So `wait_for_reply` returns the result, with no reply needed
+from the executor.
+
+One consequence matters for your review: **the executor may also answer you by hand**, and if it marks
+that reply as the final result, the automatic one is suppressed so you receive exactly one final answer.
+Either way there is exactly one result per round. If you ever see two, that is a bug worth reporting, not
+a second round to review.
+
 ### Never resend because a wait timed out
 
 A timeout means *no reply yet*. It does not mean the message was lost, and it is never a reason to send

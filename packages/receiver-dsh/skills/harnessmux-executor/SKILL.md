@@ -55,6 +55,32 @@ the outcome, the work would cross a safety or data boundary, or you are blocked 
 a retry. Then send a `question` with `expect_reply`, and keep the work intact so the answer can be acted
 on immediately.
 
+## How your answer actually gets back
+
+You do not have to do anything for the commander to receive your result: when your turn ends
+successfully, HarnessMux sends your final visible text back on the thread the task arrived on, addressed
+to the commander that asked, exactly once. That is the normal path, and it is why "reply" is not
+mandatory for a routine round.
+
+Two rules follow from it.
+
+**If you reply yourself, say what kind of reply it is.** The `mailbox` tool's `reply` action takes
+`disposition`:
+
+- `disposition=progress` (the default) or `disposition=question` — a status note or a question. The
+  automatic reply still carries your final result back afterwards, so the commander gets both.
+- `disposition=final` — **this reply is the result.** The automatic reply is suppressed, because
+  otherwise the commander would receive two final answers for one round. Use it when the reply you are
+  sending *is* the deliverable report, and send it last.
+
+If you use `disposition=final`, your reply must contain the same evidence review (`RESULT`, `EVIDENCE`,
+`TESTS`, `POSTFLIGHT`, `LIMITATIONS`, `VERDICT`) that a final answer would — beoming the answer does not
+lower the bar for it.
+
+**A completed turn with no visible text sends nothing.** If you finish with reasoning only, the commander
+is left waiting; end your turn with the report as visible text or send it yourself with
+`disposition=final`.
+
 ## Round discipline
 
 - **Keep the same thread.** A follow-up in the same thread is the same task continuing. Starting a new
