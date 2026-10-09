@@ -699,7 +699,8 @@ withRoot((root) => {
 	const deferBlock = source.slice(source.indexOf("const ownership = sessionTurnState"), source.indexOf("const text = deliveryText"));
 	assert.match(deferBlock, /releaseDelivery/u, "deferral releases the delivery back to the queue");
 	assert.equal(/ackDelivery/u.test(deferBlock), false, "and never acks it, because the host accepted nothing");
-	// The log, not the snapshot, is what carries turn lifecycle.
+	// Turn state is read from the durable log. Both sources were measured to carry the same events, including
+	// `turn/start` and `turn/end`, so this is a choice of authority rather than a workaround.
 	assert.match(source, /Array\.isArray\(session\.log\) \? session\.log : \[\]/u, "turn state is read from the session log");
 }
 

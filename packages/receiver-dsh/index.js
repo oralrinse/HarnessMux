@@ -1571,7 +1571,10 @@ export function apply(ctx, config = {}) {
 			const agent = liveAgentFor(sessionId);
 			const session = agent?.session ?? null;
 			if (session === null) return { open: false, turn: null, turnStartSeq: null };
-			// The log is required here: measured, `snapshotEvents()` exposes no turn events at all.
+			// The log is read rather than the snapshot purely because turn lifecycle belongs to the durable log.
+			// (An earlier comment here claimed `snapshotEvents()` exposes no turn events; that was a wrong
+			// reading of a windowed comparison and has been corrected — measured, the snapshot carries the
+			// same events, `turn/start` and `turn/end` included.)
 			const events = Array.isArray(session.log) ? session.log : [];
 			return executionV2.openTurnIn(events);
 		} catch {
