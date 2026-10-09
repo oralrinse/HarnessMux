@@ -1366,6 +1366,8 @@ export function apply(ctx, config = {}) {
 						// Live agents first, then published-but-unloaded sessions: the second group is
 						// what makes an idle, user-visible session wakeable at all.
 						for (const agent of agents) pumpV2(agent);
+			// Turn lifecycle is read from the target sessions themselves, not from stream metadata.
+			watchSessionLogs();
 						for (const candidate of pumpCandidates()) {
 							if (candidate.status === "unloaded") pumpV2(candidate);
 						}
@@ -1455,6 +1457,81 @@ export function apply(ctx, config = {}) {
 	 *
 	 * @param {{frame?: object, agent?: object}} payload - the host event payload.
 	 */
+	/**
+	 * Follow each target session's own log, which is where turns actually live.
+	 *
+	 * This is the correction that matters: an earlier version drove turns from `assistant-stream` attempt
+	 * ids, and measured, a tool call ends a *step* rather than the turn, so the same turn keeps going with a
+	 * new attempt. Turns therefore come from here — `turn/start` opens one, `turn/end` closes it — and the
+	 * final answer is read from the session's own event list rather than from stream metadata, which was
+	 * proven untrustworthy (`payload.agent` is the boot agent even for another session's turn).
+	 *
+	 * `assistant-stream` keeps only its diagnostic and streaming role.
+	 */
+	function watchSessionLogs() {
+		try {
+			if (executionV2 === null || finalCapture === null) return;
+			for (const record of executionV2.outstandingExecutions(root)) {
+				const sessionId = record.sessionId;
+				if (typeof sessionId !== "string" || sessionId === "") continue;
+				const agent = liveAgentFor(sessionId);
+				if (agent === null) continue;
+				const session = agent.session ?? null;
+				if (session === null) continue;
+				const events = typeof session.snapshotEvents === "function" ? session.snapshotEvents() : session.log;
+				if (!Array.isArray(events)) continue;
+				// The baseline is captured once, on the first pass after the dispatch.
+				if (record.baselineLogSeq === null) {
+					const lastSeq = events.at(-1)?.seq;
+					executionV2.setBaseline?.(root, record.executionId, Number.isInteger(lastSeq) ? lastSeq : 0);
+					continue;
+				}
+				const fresh = events.filter((entry) => Number.isInteger(entry?.seq) && entry.seq > record.baselineLogSeq);
+				for (const entry of fresh) {
+					if (entry?.type === "turn/start" && Number.isInteger(entry?.data?.turn)) {
+						const before = record.turns?.length ?? 0;
+						const opened = executionV2.openTurn(root, record.executionId, { turn: entry.data.turn, turnStartSeq: entry.seq });
+						if ((opened?.turns?.length ?? 0) > before) {
+							diagnose(`log: execution ${record.executionId} turn ${entry.data.turn} start#${entry.seq}`);
+						}
+						continue;
+					}
+					if (entry?.type !== "turn/end" || !Number.isInteger(entry?.data?.turn)) continue;
+					const turn = entry.data.turn;
+					const reasonKind = String(entry?.data?.reason?.kind ?? "unknown");
+					const ended = executionV2.endTurn(root, record.executionId, { turn, reason: entry?.data?.reason, turnEndSeq: entry.seq });
+					diagnose(`log: execution ${record.executionId} turn ${turn} end#${entry.seq} reason=${reasonKind} state=${ended?.state ?? "?"}`);
+					if (reasonKind !== "completed") continue;
+					// The answer is the last text-bearing assistant message inside this turn, never a
+					// concatenation of every one of them, because a turn has one per step.
+					const answer = finalCapture.finalAnswerOf(events, turn);
+					if (answer === null) {
+						// Completed with no visible text is a distinct outcome, and must not look like an answer.
+						diagnoseOnChange(`empty-final:${record.executionId}`, String(turn), `log: execution ${record.executionId} turn ${turn} completed with no visible text`);
+						continue;
+					}
+					executionV2.setFinalAnswer(root, record.executionId, { finalText: answer.text, assistantMessageSeq: answer.seq, turn });
+					diagnose(`log: execution ${record.executionId} final turn=${turn} seq=${answer.seq} text=${answer.text.length}chars`);
+				}
+			}
+		} catch (error) {
+			ctx.logger?.warn?.(`[harnessmux] session log watch failed: ${String(error)}`);
+		}
+	}
+
+	/**
+	 * The live agent for a session, when this process has one.
+	 *
+	 * @param {string} sessionId - the session id.
+	 * @returns {object|null} the agent, or null.
+	 */
+	function liveAgentFor(sessionId) {
+		try {
+			return (ctx.agents?.roots?.() ?? []).find((candidate) => candidate?.session?.header?.id === sessionId) ?? null;
+		} catch {
+			return null;
+		}
+	}
 	function captureAssistantFrame(payload) {
 		try {
 			if (finalCapture === null || executionV2 === null) return;
@@ -1490,44 +1567,28 @@ export function apply(ctx, config = {}) {
 			}
 			const open = executionV2.getExecution(root, candidate);
 			if (open === null) return;
-			// A different attempt id is a continuation, not a conflict.
-			//
-			// Measured: a turn that ends with `reason.kind="tool-calls"` is followed by another turn the host
-			// opens by itself, with no further delivery. An earlier version refused that second attempt as a
-			// mismatch, which discarded the very answer the tool was called for. One delegated task is a
-			// multi-turn chain, so attempts are recorded as turns of the execution rather than as its identity.
 			const sessionId = open.sessionId;
 			if (sessionId === "") return;
+			// The frame's only job now is diagnostics and the text the stream blocks carry. It is explicitly
+			// **not** allowed to define turns: measured on a real host, a tool call ends a *step* and the same
+			// turn continues, so a changing attempt id is not evidence of a new turn. Turns come from the
+			// target session's own `turn/start` (see watchSessionLog).
+			executionV2.attachAttempt(root, open.executionId, { attemptId, turn: finalCapture.turnFromAttemptId(attemptId) });
 			const key = finalCapture.attemptKey(sessionId, attemptId);
 			let record = OPEN_ACCUMULATORS.get(key);
 			if (record === undefined) {
-				// The execution was resolved by identity above, so this attempt belongs to it.
-				//
-				// Only the attempt id is recorded. Its leading segment is deliberately NOT taken as the session:
-				// measured on a real host, an attempt opened on one session carries the *boot* session's id as
-				// its prefix, so deriving a session from it would record a wrong one and make every later lookup
-				// wrong with it.
-				executionV2.attachAttempt(root, open.executionId, { attemptId, turn: finalCapture.turnFromAttemptId(attemptId) });
-				diagnose(`capture: execution ${open.executionId} turn ${attemptId}`);
 				record = finalCapture.createAccumulator({ sessionId, attemptId });
 				OPEN_ACCUMULATORS.set(key, record);
 			}
 			finalCapture.accumulateFrame(record, frame);
 
 			// How this turn ended decides whether the execution is finished or waiting for a continuation.
-			// The record keeps the text and the anchor; sending an answer is a later, separate step.
+			// The stream's `end` frame closes only this attempt's accumulator. It must not close the execution:
+			// its reason describes the attempt, and measured, an attempt ending in `tool-calls` is followed by
+			// further steps inside the *same* turn. Turn and execution lifecycle belong to the session's log.
 			if (frame.type === "end") {
-				const verdict = finalCapture.completionOf(record);
-				const ended = executionV2.endTurn(root, open.executionId, {
-					attemptId,
-					reason: record.reason,
-					finalText: finalCapture.finalTextOf(record),
-					textBlocks: record.textBlocks,
-					assistantMessageSeq: record.assistantMessageSeq,
-					turnEndSeq: record.turnEndSeq
-				});
 				diagnose(
-					`capture: turn ${attemptId} ended reason=${verdict.reason} text=${finalCapture.finalTextOf(record).length}chars state=${ended?.state ?? "?"}turns=${ended?.turns?.length ?? "?"} execution=${open.executionId}`
+					`capture: attempt ${attemptId} ended reason=${finalCapture.completionOf(record).reason} text=${finalCapture.finalTextOf(record).length}chars execution=${open.executionId}`
 				);
 				OPEN_ACCUMULATORS.delete(key);
 			}

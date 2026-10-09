@@ -165,3 +165,64 @@ export function completionOf(record) {
 	const hasText = finalTextOf(record) !== "";
 	return { complete: kind === "completed", reason: String(kind), hasText };
 }
+
+/**
+ * Collect the visible text of one event, wherever it is nested.
+ *
+ * Measured shape: `event.data.message.content[]` holds blocks, and the visible ones are
+ * `{ type: "text", text }` — often beside a `{ type: "reasoning" }` block whose text is empty. A
+ * reasoning block is never user-visible, so only `type === "text"` is collected, in content order.
+ *
+ * @param {object} event - a session event.
+ * @returns {string} the joined visible text, or an empty string.
+ */
+export function visibleTextOf(event) {
+	const parts = [];
+	const walk = (value) => {
+		if (value === null || typeof value !== "object") return;
+		if (Array.isArray(value)) {
+			for (const item of value) walk(item);
+			return;
+		}
+		if (value.type === "text" && typeof value.text === "string") parts.push(value.text);
+		for (const nested of Object.values(value)) walk(nested);
+	};
+	walk(event);
+	return parts.join("");
+}
+
+/**
+ * The session event that carries a turn's final answer.
+ *
+ * The rule, chosen to avoid the failure mode that a per-step `assistant/message` invites: a turn contains
+ * **several** `assistant/message` events — one per step, including tool-calling steps whose text is empty
+ * or is an intermediate remark. Concatenating them would produce duplicated interim output, so the answer
+ * is the **last** `assistant/message` inside the turn that actually carries visible text.
+ *
+ * @param {object[]} events - the session's own event list (e.g. `snapshotEvents()`).
+ * @param {number} turn - the turn whose answer is wanted.
+ * @returns {object|null} the chosen event, or null.
+ */
+export function finalAssistantEvent(events, turn) {
+	if (!Array.isArray(events) || !Number.isInteger(turn)) return null;
+	const candidates = events.filter(
+		(entry) => entry?.type === "assistant/message" && entry?.data?.turn === turn && visibleTextOf(entry) !== ""
+	);
+	return candidates.length === 0 ? null : candidates[candidates.length - 1];
+}
+
+/**
+ * The terminal answer of a completed turn: `{ seq, text }` from the session's own event list.
+ *
+ * Returns null when there is no text-bearing assistant message, so "completed but empty" stays visible as
+ * a distinct outcome rather than being reported as an answer of length zero.
+ *
+ * @param {object[]} events - the session's own event list.
+ * @param {number} turn - the completed turn.
+ * @returns {{seq: number|null, text: string}|null} the answer, or null.
+ */
+export function finalAnswerOf(events, turn) {
+	const event = finalAssistantEvent(events, turn);
+	if (event === null) return null;
+	return { seq: Number.isInteger(event.seq) ? event.seq : null, text: visibleTextOf(event) };
+}

@@ -140,15 +140,19 @@ export function beginExecution(root, input = {}) {
 		hostSessionId: "",
 		sessionId: String(input.sessionId ?? ""),
 		dispatchKind: input.dispatchKind === "followup" ? "followup" : "steer",
-		// One delegated task can be several host turns: a turn that ends in `tool-calls` has called a tool
-		// and not yet answered, and the host opens the next turn on its own. So an attempt id is a property
-		// of a *turn*, not of the delivery, and the record keeps them in order.
+		// Turns come only from the target session's own `session.log` `turn/start` events. A changing attempt id
+		// is **not** evidence of a new turn: measured on a real host, a tool call ends a *step*, not the turn,
+		// and the host continues with the next step of the same turn. Attempts are therefore recorded inside
+		// the turn they occurred in, as diagnostics, and never create a turn by themselves.
 		turns: [],
+		// Where the target session's log stood when this delivery was dispatched.
+		baselineLogSeq: null,
+		// The terminal answer, taken from the target session's own event list.
+		finalAssistantMessageSeq: null,
+		finalText: "",
+		finalTurn: null,
 		attemptId: null,
 		turn: null,
-		// The log position from which this delivery's turns are read.
-		baselineLogSeq: null,
-		finalText: "",
 		reason: null,
 		assistantMessageSeq: null,
 		explicitReplyMessageId: null,
@@ -212,57 +216,119 @@ export function markDispatchFailed(root, executionId, reason) {
  * @param {object} input - `attemptId` and optional `turn`.
  * @returns {object|null} the updated record.
  */
+/**
+ * Record an attempt as diagnostics inside the turn it belongs to.
+ *
+ * An attempt id is an opaque host key for one model attempt. It is deliberately **not** allowed to create a
+ * turn: measured on a real host, a tool call ends a *step* — the same turn continues with the next step —
+ * so treating a changing attempt id as a new turn would invent turns the session never opened. Attempts are
+ * attached to the current turn, or held aside until the turn they belong to is known.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution id.
+ * @param {object} input - `attemptId` and optional `turn`.
+ * @returns {object|null} the updated record.
+ */
 export function attachAttempt(root, executionId, input = {}) {
 	const record = getExecution(root, executionId);
 	if (record === null) return null;
 	const attemptId = String(input.attemptId ?? "");
 	if (attemptId === "") return record;
-	const turns = Array.isArray(record.turns) ? [...record.turns] : [];
-	const existing = turns.findIndex((entry) => entry.attemptId === attemptId);
-	const turn = {
-		...(existing === -1 ? {} : turns[existing]),
-		attemptId,
-		turn: Number.isInteger(input.turn) ? input.turn : (existing === -1 ? null : turns[existing].turn),
-		openedAt: existing === -1 ? new Date().toISOString() : turns[existing].openedAt
-	};
-	if (existing === -1) turns.push(turn);
-	else turns[existing] = turn;
+	const turns = [...(Array.isArray(record.turns) ? record.turns : [])];
+	const turnNumber = Number.isInteger(input.turn) ? input.turn : null;
+
+	// Attach to the turn the host says it belongs to when one is given, otherwise to the newest turn.
+	let index = turnNumber === null ? turns.length - 1 : turns.findIndex((entry) => entry.turn === turnNumber);
+	if (index === -1) index = turns.length - 1;
+	if (index < 0) {
+		// No turn known yet. Held as pending rather than promoted into a turn.
+		const pending = Array.isArray(record.pendingAttempts) ? [...record.pendingAttempts] : [];
+		if (!pending.includes(attemptId)) pending.push(attemptId);
+		return writeExecution(root, { ...record, pendingAttempts: pending, attemptId });
+	}
+	const turn = turns[index];
+	const attempts = Array.isArray(turn.attempts) ? [...turn.attempts] : [];
+	if (!attempts.includes(attemptId)) attempts.push(attemptId);
+	turns[index] = { ...turn, attempts };
+	return writeExecution(root, { ...record, turns, attemptId, turn: turn.turn });
+}
+
+/**
+ * Record a turn the target session actually opened.
+ *
+ * This is the only way a turn enters the record, and it is called from the session's own `turn/start`
+ * event. Nothing inferred from an attempt id can reach it.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution id.
+ * @param {object} input - `turn`, `turnStartSeq`.
+ * @returns {object|null} the updated record.
+ */
+/**
+ * Record the log position this delivery starts reading its turns from.
+ *
+ * Captured on the first watcher pass after the dispatch, so turns that already existed are never attributed
+ * to this delivery.
+ *
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution id.
+ * @param {number} seq - the last sequence present before the dispatch took effect.
+ * @returns {object|null} the updated record.
+ */
+export function setBaseline(root, executionId, seq) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	if (record.baselineLogSeq !== null) return record;
+	return writeExecution(root, { ...record, baselineLogSeq: Number.isInteger(seq) ? seq : 0 });
+}
+export function openTurn(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	const turnNumber = Number.isInteger(input.turn) ? input.turn : null;
+	if (turnNumber === null) return record;
+	const turns = [...(Array.isArray(record.turns) ? record.turns : [])];
+	if (turns.some((entry) => entry.turn === turnNumber)) return record;
+	const pending = Array.isArray(record.pendingAttempts) ? record.pendingAttempts : [];
+	turns.push({
+		turn: turnNumber,
+		turnStartSeq: Number.isInteger(input.turnStartSeq) ? input.turnStartSeq : null,
+		turnEndSeq: null,
+		reason: null,
+		attempts: [...pending]
+	});
 	return writeExecution(root, {
 		...record,
 		turns,
-		// `attemptId`/`turn` keep naming the newest turn, for callers that want only that.
-		attemptId,
-		turn: turn.turn ?? record.turn,
+		turn: turnNumber,
+		pendingAttempts: [],
 		state: record.state === "dispatching" ? "running" : record.state
 	});
 }
 
 /**
- * Record how a turn ended, and whether the execution is finished or waiting for a continuation.
+ * Record how a turn ended, from the target session's own `turn/end` event.
  *
- * `tool-calls` is measured **non-terminal**: the host opens another turn on its own. `completed` is the
- * candidate terminal reason, `error` is a terminal failure. Other reasons are recorded as-is rather than
- * guessed at, and any of them leaves the record readable.
+ * `reason` here is the **turn's** reason, which is what decides whether an execution is finished. It is not
+ * the reason an assistant-stream attempt finished with — measured, a `tool-calls` finish ends a step inside
+ * the turn, and the turn continues.
  *
  * @param {string} root - bridge root.
  * @param {string} executionId - the execution id.
- * @param {object} input - `attemptId`, `reason`, `finalText`, optional `assistantMessageSeq`.
+ * @param {object} input - `turn`, `reason`, `turnEndSeq`.
  * @returns {object|null} the updated record.
  */
 export function endTurn(root, executionId, input = {}) {
 	const record = getExecution(root, executionId);
 	if (record === null) return null;
-	const attemptId = String(input.attemptId ?? "");
+	const turnNumber = Number.isInteger(input.turn) ? input.turn : null;
 	const reasonKind = String(input.reason?.kind ?? "unknown");
-	const terminal = TERMINAL_TURN_REASONS.has(reasonKind);
+	const terminal = reasonKind === "completed" || reasonKind === "error";
 	const turns = (Array.isArray(record.turns) ? record.turns : []).map((entry) =>
-		entry.attemptId === attemptId
+		turnNumber === null || entry.turn === turnNumber
 			? {
 					...entry,
 					reason: input.reason ?? null,
-					turnEndSeq: Number.isInteger(input.turnEndSeq) ? input.turnEndSeq : (entry.turnEndSeq ?? null),
-					assistantMessageSeq: Number.isInteger(input.assistantMessageSeq) ? input.assistantMessageSeq : (entry.assistantMessageSeq ?? null),
-					textBlocks: Array.isArray(input.textBlocks) ? input.textBlocks : (entry.textBlocks ?? [])
+					turnEndSeq: Number.isInteger(input.turnEndSeq) ? input.turnEndSeq : (entry.turnEndSeq ?? null)
 				}
 			: entry
 	);
@@ -270,18 +336,28 @@ export function endTurn(root, executionId, input = {}) {
 		...record,
 		turns,
 		reason: input.reason ?? record.reason,
-		state: terminal ? (reasonKind === "error" ? "failed" : "completed") : "awaiting_continuation"
+		state: terminal ? (reasonKind === "error" ? "failed" : "completed") : "running"
 	});
 }
 
 /**
- * Turn reasons that finish an execution.
+ * Record the terminal answer, taken from the target session's own event list.
  *
- * Kept deliberately short and evidence-based. `tool-calls` is excluded because it was measured: the host
- * continued with a further turn, so treating it as terminal would end an execution mid-task. Anything not
- * listed here leaves the execution awaiting a continuation rather than being declared done.
+ * @param {string} root - bridge root.
+ * @param {string} executionId - the execution id.
+ * @param {object} input - `finalText`, `assistantMessageSeq`, `turn`.
+ * @returns {object|null} the updated record.
  */
-const TERMINAL_TURN_REASONS = new Set(["completed", "error"]);
+export function setFinalAnswer(root, executionId, input = {}) {
+	const record = getExecution(root, executionId);
+	if (record === null) return null;
+	return writeExecution(root, {
+		...record,
+		finalText: String(input.finalText ?? ""),
+		finalAssistantMessageSeq: Number.isInteger(input.assistantMessageSeq) ? input.assistantMessageSeq : record.finalAssistantMessageSeq,
+		finalTurn: Number.isInteger(input.turn) ? input.turn : record.finalTurn
+	});
+}
 /**
  * Record a completed turn's outcome on an execution.
  *

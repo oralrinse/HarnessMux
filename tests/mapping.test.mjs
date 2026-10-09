@@ -236,13 +236,14 @@ withRoot((root) => {
 	execution.markDispatchFailed(root, begun.executionId, "nope");
 	assert.equal(execution.staleExecutions(root, -1).length, 0, "an explained failure is not left looking unresolved");
 
-	// A second attempt on one execution used to be refused. That was wrong — it is a continuation turn, and
-	// refusing it discarded a tool-calling task's answer. M20 owns that behaviour now; here the point is
-	// only that a continuation is recorded rather than silently dropped.
+	// An attempt id does not create a turn. Measured on a real host, a tool call ends a *step* and the same
+	// turn continues, so a changed attempt id is not evidence of a new turn — turns come from the session's
+	// own `turn/start`. M20 owns that rule; here the point is that attempts are held without inventing a turn.
 	const other = execution.beginExecution(root, { deliveryId: "D8b", originMessageId: "M8b", threadId: "T8b", sessionId: "session-S8b", dispatchKind: "steer" });
 	execution.attachAttempt(root, other.executionId, { attemptId: "session-S8b:1" });
 	execution.attachAttempt(root, other.executionId, { attemptId: "session-S8b:2" });
-	assert.equal(execution.getExecution(root, other.executionId).turns.length, 2, "a following turn belongs to the same execution");
+	assert.equal(execution.getExecution(root, other.executionId).turns.length, 0, "attempts alone invent no turn");
+	assert.equal(execution.getExecution(root, other.executionId).pendingAttempts.length, 2, "they are held until a turn is known");
 });
 
 // --- M9. text is never reconstructed from deltas -----------------------------
@@ -322,11 +323,15 @@ withRoot((root) => {
 		false,
 		"there is no 'exactly one outstanding, so it must be this' fallback"
 	);
+	// `outstandingExecutions` is used, but by the session-log watcher to iterate whose log to read — never by
+	// frame attribution. The inference that must stay absent is the one that picked an owner from the *count*
+	// of outstanding executions.
 	assert.equal(
-		/outstandingExecutions\(root\)/u.test(source),
+		/outstanding\.length === 1/u.test(source),
 		false,
-		"and the outstanding list is not consulted to guess an owner"
+		"the count of outstanding executions still never picks an owner"
 	);
+	assert.match(source, /for \(const record of executionV2\.outstandingExecutions\(root\)\)/u, "it iterates sessions to read their logs instead");
 
 	// Attribution must be anchored on the dispatched agent object.
 	assert.match(source, /DISPATCHED_AGENTS = new WeakMap\(\)/u, "the dispatcher is tracked by object identity");
@@ -526,56 +531,76 @@ withRoot((root) => {
 	assert.match(captureSource, /hasText/u, "with text presence reported separately, so 'completed but empty' stays visible");
 }
 
-// --- M20. one delegated task is a multi-turn chain, not one attempt ----------
-// Measured on a real host: a turn ended with `reason={"kind":"tool-calls"}` and the host opened the next
-// turn by itself, with no further delivery. An earlier version refused that second attempt as an attempt
-// mismatch and therefore discarded the answer the tool was called for.
+// --- M20. turns come from the session log; attempts never invent one ---------
+// Corrected model. A real host showed a tool call ending a *step*, with the same turn continuing:
 //
-// So an attempt id belongs to a *turn*, not to the delivery: `execution.turns[]`, with `attemptId` kept
-// only as the newest one for convenience. And `tool-calls` is non-terminal, which is asserted rather than
-// left to a comment.
+//   turn/start#5 -> step/start -> assistant/message + tool/call + tool/result -> step/end
+//                -> step/start -> assistant/message + tool/call + tool/result -> step/end
+//                -> step/start -> assistant/message (the answer) -> step/end
+//                -> turn/end#36 reason={"kind":"completed"}
+//
+// so "a new attempt" is not "a new turn". The earlier reading of `attempt :2 -> :3` as two turns was wrong,
+// and this test exists to keep the corrected rule.
 {
-	const root = mkdtempSync(join(tmpdir(), "hxmux-multiturn-"));
+	const root = mkdtempSync(join(tmpdir(), "hxmux-turns-"));
 	core.ensureBridge(root, { remember: false });
 	try {
 		const ex = execution.beginExecution(root, {
-			deliveryId: "D-multi",
-			originMessageId: "M-multi",
-			threadId: "T-multi",
+			deliveryId: "D-turns",
+			originMessageId: "M-turns",
+			threadId: "T-turns",
 			sessionId: "session-A",
 			dispatchKind: "steer"
 		});
+		// Attempts before any turn is known: held, and no turn invented.
 		execution.attachAttempt(root, ex.executionId, { attemptId: "session-X:2", turn: 2 });
-		const afterToolTurn = execution.endTurn(root, ex.executionId, { attemptId: "session-X:2", reason: { kind: "tool-calls" } });
-		assert.equal(afterToolTurn.state, "awaiting_continuation", "a tool-calling turn does not finish the execution");
-		assert.equal(afterToolTurn.turns.length, 1, "the first turn is recorded");
+		execution.attachAttempt(root, ex.executionId, { attemptId: "session-X:3", turn: 2 });
+		let current = execution.getExecution(root, ex.executionId);
+		assert.equal(current.turns.length, 0, "an attempt id never creates a turn");
+		assert.deepEqual(current.pendingAttempts, ["session-X:2", "session-X:3"], "both attempts are held as diagnostics");
 
-		// The continuation turn must be accepted, not refused.
-		execution.attachAttempt(root, ex.executionId, { attemptId: "session-X:3", turn: 3 });
-		const withContinuation = execution.getExecution(root, ex.executionId);
-		assert.equal(withContinuation.turns.length, 2, "the continuation turn joins the same execution");
-		assert.deepEqual(withContinuation.turns.map((t) => t.attemptId), ["session-X:2", "session-X:3"], "in host order");
-		assert.equal(withContinuation.attemptId, "session-X:3", "while the newest attempt is still convenient to read");
+		// Only the log's own turn/start opens one, and the held attempts join it.
+		execution.openTurn(root, ex.executionId, { turn: 1, turnStartSeq: 5 });
+		current = execution.getExecution(root, ex.executionId);
+		assert.equal(current.turns.length, 1, "turn/start opens exactly one turn");
+		assert.deepEqual(current.turns[0].attempts, ["session-X:2", "session-X:3"], "and both attempts are recorded inside it");
+		assert.equal(current.turns[0].turnStartSeq, 5, "with the sequence it opened at");
+		assert.equal(current.state, "running", "the execution is running while the turn is open");
 
-		const finished = execution.endTurn(root, ex.executionId, { attemptId: "session-X:3", reason: { kind: "completed" }, finalText: "the answer" });
-		assert.equal(finished.state, "completed", "a completed turn finishes it");
+		// Opening the same turn twice is idempotent: the log can be read more than once.
+		execution.openTurn(root, ex.executionId, { turn: 1, turnStartSeq: 5 });
+		assert.equal(execution.getExecution(root, ex.executionId).turns.length, 1, "re-reading the same turn/start does not duplicate it");
 
-		// An errored turn is terminal failure rather than a silent wait.
-		const failed = execution.beginExecution(root, { deliveryId: "D-err", sessionId: "session-B", dispatchKind: "followup" });
-		execution.attachAttempt(root, failed.executionId, { attemptId: "session-Y:1" });
-		const errored = execution.endTurn(root, failed.executionId, { attemptId: "session-Y:1", reason: { kind: "error", error: { message: "boom" } } });
-		assert.equal(errored.state, "failed", "an errored turn is terminal failure");
+		// The turn's own reason decides the outcome, not the attempt's.
+		const done = execution.endTurn(root, ex.executionId, { turn: 1, reason: { kind: "completed" }, turnEndSeq: 36 });
+		assert.equal(done.state, "completed", "turn/end completed finishes the execution");
+		assert.equal(done.turns[0].turnEndSeq, 36, "and records where it ended");
 
-		// An unrecognised reason is recorded and left awaiting, never declared done.
-		const odd = execution.beginExecution(root, { deliveryId: "D-odd", sessionId: "session-C", dispatchKind: "steer" });
-		execution.attachAttempt(root, odd.executionId, { attemptId: "session-Z:1" });
-		const oddEnd = execution.endTurn(root, odd.executionId, { attemptId: "session-Z:1", reason: { kind: "something-new" } });
-		assert.equal(oddEnd.state, "awaiting_continuation", "an unclassified reason is not treated as done");
+		// An errored turn is terminal failure.
+		const bad = execution.beginExecution(root, { deliveryId: "D-err", sessionId: "session-B", dispatchKind: "followup" });
+		execution.openTurn(root, bad.executionId, { turn: 1, turnStartSeq: 1 });
+		assert.equal(execution.endTurn(root, bad.executionId, { turn: 1, reason: { kind: "error" } }).state, "failed", "an errored turn fails the execution");
+
+		// The final answer is the last text-bearing assistant message of the completed turn, never a join.
+		const events = [
+			{ type: "assistant/message", seq: 21, data: { turn: 1, message: { role: "assistant", content: [{ type: "text", text: "interim" }] } } },
+			{ type: "assistant/message", seq: 28, data: { turn: 1, message: { role: "assistant", content: [{ type: "reasoning", text: "thinking" }] } } },
+			{ type: "assistant/message", seq: 34, data: { turn: 1, message: { role: "assistant", content: [{ type: "reasoning", text: "" }, { type: "text", text: "the answer" }] } } }
+		];
+		const answer = capture.finalAnswerOf(events, 1);
+		assert.equal(answer.seq, 34, "the last text-bearing assistant message is chosen");
+		assert.equal(answer.text, "the answer", "and reasoning is excluded rather than concatenated");
+		assert.equal(answer.text.includes("interim"), false, "earlier per-step messages are not joined in");
+		assert.equal(capture.finalAnswerOf(events, 2), null, "a turn with no text-bearing message has no answer");
+
+		execution.setFinalAnswer(root, ex.executionId, { finalText: answer.text, assistantMessageSeq: answer.seq, turn: 1 });
+		const finished = execution.getExecution(root, ex.executionId);
+		assert.equal(finished.finalText, "the answer", "the answer is recorded on the execution");
+		assert.equal(finished.finalAssistantMessageSeq, 34, "with the sequence it came from");
 	} finally {
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}
 }
-
 // --- M21. the target session's own event list is the content authority --------
 // Measured on a real WORKING session with the receiver mounted. `session.snapshotEvents()` returned the
 // complete ordered chain for the task, and every `assistant/message` in it carried its own text:
