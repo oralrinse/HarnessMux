@@ -1198,6 +1198,30 @@ export function apply(ctx, config = {}) {
 			diagnose(`pump: cannot wake for ${delivery.deliveryId}: no session id`);
 			return;
 		}
+		// Turn ownership is a precondition, and it is a scheduling rule of the Commander workflow rather than a
+		// change to delivery semantics.
+		//
+		// A delegated task must answer with its *own* result. Steering it into a turn somebody else started
+		// would make the final assistant message a mixture of that work and this delivery — measurable, but
+		// not attributable — so the reply could not honestly claim to be this execution's answer. Waiting for
+		// idle costs a moment and buys a clean turn.
+		//
+		// The one exception is a turn this execution demonstrably opened, which is its own continuation.
+		const ownership = sessionTurnState(targetSessionId);
+		if (ownership.open && !executionV2.ownsOpenTurn(executionV2.outstandingExecution(root, targetSessionId), ownership)) {
+			// Deferred, not failed and not acked: the host has not accepted anything yet, so acking here would
+			// claim an acceptance that never happened. The delivery returns to the queue and is re-claimed
+			// once the session is free.
+			mailboxV2.releaseDelivery(root, delivery.deliveryId, { reason: "waiting-for-idle" });
+			retryAfter.set(backoffKey(delivery.deliveryId), Date.now() + RETRY_BASE_MS);
+			diagnoseOnChange(
+				`waiting-idle:${targetSessionId}`,
+				`${ownership.turn}`,
+				`pump: defer ${delivery.deliveryId} — ${targetSessionId} is running turn ${ownership.turn} (start#${ownership.turnStartSeq}) which this execution does not own; not steering`
+			);
+			return;
+		}
+
 		const text = deliveryText(delivery, claim, message);
 		// Same ordering rule as the steer path: the correlation is durable before the host is touched, so
 		// a crash cannot leave a completed turn that nothing points back to.
@@ -1532,6 +1556,30 @@ export function apply(ctx, config = {}) {
 	 * @param {string} sessionId - the session id.
 	 * @returns {object|null} the agent, or null.
 	 */
+	/**
+	 * What the target session's own log says about its current turn.
+	 *
+	 * Read from the log rather than from `agent.status`, because the log is the turn-lifecycle authority: a
+	 * turn is open when its `turn/start` has no matching `turn/end`. The distinction matters — a session can
+	 * report `running` for several attempts inside one turn.
+	 *
+	 * @param {string} sessionId - the session id.
+	 * @returns {{open: boolean, turn: number|null, turnStartSeq: number|null}} the open turn, if any.
+	 */
+	function sessionTurnState(sessionId) {
+		try {
+			const agent = liveAgentFor(sessionId);
+			const session = agent?.session ?? null;
+			if (session === null) return { open: false, turn: null, turnStartSeq: null };
+			// The log is required here: measured, `snapshotEvents()` exposes no turn events at all.
+			const events = Array.isArray(session.log) ? session.log : [];
+			return executionV2.openTurnIn(events);
+		} catch {
+			// Unreadable state is treated as "not provably free", so a task is deferred rather than steered
+			// into a turn that cannot be shown to be its own.
+			return { open: true, turn: null, turnStartSeq: null };
+		}
+	}
 	function liveAgentFor(sessionId) {
 		try {
 			return (ctx.agents?.roots?.() ?? []).find((candidate) => candidate?.session?.header?.id === sessionId) ?? null;

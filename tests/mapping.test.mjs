@@ -647,4 +647,60 @@ withRoot((root) => {
 	}
 }
 
+// --- M22. Commander delegated execution requires turn ownership ---------------
+// Decided rule, and the reason for it: if a delivery is steered into a turn somebody else started, the
+// final assistant message answers that work *and* this task, so a reply could not honestly claim to be this
+// execution's result. Waiting for idle costs a moment and buys a turn that can be attributed. This is a
+// scheduling rule of the Commander workflow; `running -> steer` stays a general receiver capability for
+// explicit follow-ups, advisory traffic, and continuations.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-ownership-"));
+	core.ensureBridge(root, { remember: false });
+	try {
+		// A session whose log shows an open turn, started before any dispatch.
+		const bootEvents = [
+			{ type: "turn/start", seq: 5, data: { turn: 1 } },
+			{ type: "step/start", seq: 6, data: { turn: 1, step: 1 } }
+		];
+		const openTurn = execution.openTurnIn(bootEvents);
+		assert.equal(openTurn.open, true, "a turn/start with no turn/end is an open turn");
+		assert.equal(openTurn.turnStartSeq, 5, "and its position is knowable");
+
+		// A closed turn is not open.
+		const closed = execution.openTurnIn([...bootEvents, { type: "turn/end", seq: 9, data: { turn: 1, reason: { kind: "completed" } } }]);
+		assert.equal(closed.open, false, "once turn/end arrives the session is free");
+		// A later turn reopens it, and only its own end closes it.
+		const reopened = execution.openTurnIn([...bootEvents, { type: "turn/end", seq: 9, data: { turn: 1 } }, { type: "turn/start", seq: 12, data: { turn: 2 } }]);
+		assert.equal(reopened.turn, 2, "the newest open turn is the one reported");
+
+		// An execution that never opened this turn does not own it.
+		const ex = execution.beginExecution(root, { deliveryId: "D-own", sessionId: "session-A", dispatchKind: "followup", baselineLogSeq: 26 });
+		assert.equal(execution.ownsOpenTurn(ex, openTurn), false, "an execution cannot claim a turn it never opened");
+		assert.equal(execution.ownsOpenTurn(null, openTurn), false, "and no execution owns nothing");
+
+		// A turn this execution did open is its own continuation.
+		execution.openTurn(root, ex.executionId, { turn: 1, turnStartSeq: 5 });
+		assert.equal(execution.ownsOpenTurn(execution.getExecution(root, ex.executionId), openTurn), true, "a turn it opened is its own");
+
+		// Once that turn has ended, it is no longer an open turn it owns.
+		execution.endTurn(root, ex.executionId, { turn: 1, reason: { kind: "completed" }, turnEndSeq: 9 });
+		assert.equal(execution.ownsOpenTurn(execution.getExecution(root, ex.executionId), openTurn), false, "an ended turn is not an owned open turn");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- M23. the receiver defers rather than steering into a foreign turn --------
+{
+	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
+	assert.match(source, /ownsOpenTurn/u, "the wake path consults turn ownership");
+	assert.match(source, /waiting-for-idle/u, "and defers the delivery when the turn is not its own");
+	// Deferral must not ack: the host accepted nothing, so claiming acceptance would be false.
+	const deferBlock = source.slice(source.indexOf("const ownership = sessionTurnState"), source.indexOf("const text = deliveryText"));
+	assert.match(deferBlock, /releaseDelivery/u, "deferral releases the delivery back to the queue");
+	assert.equal(/ackDelivery/u.test(deferBlock), false, "and never acks it, because the host accepted nothing");
+	// The log, not the snapshot, is what carries turn lifecycle.
+	assert.match(source, /Array\.isArray\(session\.log\) \? session\.log : \[\]/u, "turn state is read from the session log");
+}
+
 console.log("mapping.test.mjs: all assertions passed");

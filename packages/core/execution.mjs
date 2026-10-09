@@ -275,6 +275,48 @@ export function attachAttempt(root, executionId, input = {}) {
  * @param {number} seq - the last sequence present before the dispatch took effect.
  * @returns {object|null} the updated record.
  */
+/**
+ * Whether a session's log shows a turn that has not yet closed.
+ *
+ * Derived from the log rather than from `agent.status`, because the log is the authority that decides turn
+ * lifecycle (a running turn is a `turn/start` without its `turn/end`). Used as the ownership gate: a
+ * delegated Commander task may only start a turn it can claim, so it must not be steered into a turn that
+ * belongs to somebody else's work.
+ *
+ * @param {object[]} events - the session's own log events.
+ * @returns {{open: boolean, turn: number|null, turnStartSeq: number|null}} what the log shows.
+ */
+export function openTurnIn(events) {
+	if (!Array.isArray(events)) return { open: false, turn: null, turnStartSeq: null };
+	let open = null;
+	for (const entry of events) {
+		if (entry?.type === "turn/start" && Number.isInteger(entry?.data?.turn)) {
+			open = { turn: entry.data.turn, turnStartSeq: Number.isInteger(entry.seq) ? entry.seq : null };
+			continue;
+		}
+		if (entry?.type === "turn/end" && open !== null && entry?.data?.turn === open.turn) open = null;
+	}
+	return open === null ? { open: false, turn: null, turnStartSeq: null } : { open: true, ...open };
+}
+
+/**
+ * Whether a running turn demonstrably belongs to this execution.
+ *
+ * Deliberately strict, and deliberately not a guess: the execution must already have recorded a turn whose
+ * `turnStartSeq` matches the turn the session currently has open. Anything else counts as somebody else's
+ * work. The Commander loop is serial — at most one active execution per target session — so a running turn
+ * that this execution did not open cannot be its own.
+ *
+ * @param {object} record - the execution.
+ * @param {{open: boolean, turnStartSeq: number|null}} openTurn - the session's open turn.
+ * @returns {boolean} true only when the open turn is provably this execution's.
+ */
+export function ownsOpenTurn(record, openTurn) {
+	if (record === null || openTurn?.open !== true) return false;
+	return (Array.isArray(record.turns) ? record.turns : []).some(
+		(turn) => turn.turnStartSeq !== null && turn.turnStartSeq === openTurn.turnStartSeq && turn.turnEndSeq === null
+	);
+}
 export function setBaseline(root, executionId, seq) {
 	const record = getExecution(root, executionId);
 	if (record === null) return null;
