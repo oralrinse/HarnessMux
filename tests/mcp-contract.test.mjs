@@ -276,7 +276,44 @@ let sent;
 	assert.equal(frames[1].error.code, -32700, "unparsable input is a parse error");
 }
 
-// --- 9. the bridge is left the way the protocol describes ----------------------
+// --- 9. a waiting tool is answered over the wire, with text ----------------------
+{
+	// `wait_for_reply` is the one tool whose handler is asynchronous. The synchronous `handle` cannot answer
+	// it — a promise serialises as a result with no `text` at all, which is what a real client rejected as an
+	// unexpected response type. Two things must therefore hold, and both are asserted here: the stdio loop
+	// answers it with the payload it waited for, and the synchronous entry point refuses it loudly.
+	const { answer, serve } = await import("../packages/mcp/server.mjs");
+	const { Readable, Writable } = await import("node:stream");
+
+	const refused = call("tools/call", { name: "wait_for_reply", arguments: { thread_id: "any", timeout_ms: 1 } });
+	assert.equal(refused.error?.code, -32603, "the synchronous path must refuse an asynchronous tool, not answer it emptily");
+
+	const written = [];
+	const input = Readable.from([
+		`${JSON.stringify({ jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: "wait_for_reply", arguments: { thread_id: "contract-wait", timeout_ms: 40 } } })}\n`
+	]);
+	const output = new Writable({ write(chunk, _encoding, done) { written.push(chunk.toString("utf8")); done(); } });
+	const started = Date.now();
+	await serve({ input, output });
+	const waited = Date.now() - started;
+	const frame = JSON.parse(written.join("").trim());
+	assert.equal(frame.id, 21, "the waiting tool's answer echoes its request id");
+	assert.equal(frame.result.isError, false, "waiting is not a tool error");
+	assert.equal(typeof frame.result.content[0].text, "string", "the waiting tool answers with text");
+	assert.ok(frame.result.content[0].text.length > 0, "and the text is not empty");
+	assert.match(frame.result.content[0].text, /status=timeout/u, "with no reply yet, the text reports the timeout");
+	assert.ok(frame.result.structuredContent !== undefined, "and the structured payload arrives with it");
+	assert.ok(waited >= 40, `the call actually waited: ${waited}ms`);
+
+	// The same tool answers with the reply when one is already waiting on the thread. The posting actor must
+	// differ from this client's, which is exactly what makes it a reply rather than an echo.
+	core.postMessage(ROOT, { from: "dsh", threadId: "contract-wait", body: "the reply under test", kind: "report" });
+	const answered = await answer({ jsonrpc: "2.0", id: 22, method: "tools/call", params: { name: "wait_for_reply", arguments: { thread_id: "contract-wait", timeout_ms: 40 } } });
+	assert.match(answered.result.content[0].text, /status=reply/u, "a waiting reply is returned");
+	assert.match(answered.result.content[0].text, /the reply under test/u, "with its body");
+}
+
+// --- 10. the bridge is left the way the protocol describes ---------------------
 {
 	const report = core.verifyInvariants(ROOT);
 	assert.equal(report.ok, true, `final invariants: ${report.violations.join("; ")}`);

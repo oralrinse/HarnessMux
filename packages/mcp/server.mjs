@@ -485,6 +485,58 @@ function tool(name) {
 	return TOOLS.find((entry) => entry.name === name) ?? null;
 }
 
+/** A value a caller has to await. */
+function isThenable(value) {
+	return value !== null && typeof value === "object" && typeof value.then === "function";
+}
+
+/** The result envelope for one tool outcome. */
+function toolResult(selected, result) {
+	return {
+		content: [{ type: "text", text: result.text }],
+		...(result.structured === undefined ? {} : { structuredContent: result.structured }),
+		isError: false
+	};
+}
+
+/**
+ * The result envelope for a tool-level failure.
+ *
+ * A tool error is content the model can act on, not a broken transport: reporting it as a JSON-RPC error
+ * would hide the reason from the conversation.
+ */
+function toolFailure(selected, error) {
+	const text = error instanceof ToolError ? error.message : `${selected.name} failed: ${String(error?.message ?? error)}`;
+	return { content: [{ type: "text", text }], isError: true };
+}
+
+/**
+ * Answer one message, waiting for a tool that is asynchronous.
+ *
+ * `handle` is synchronous, so a waiting tool cannot be answered there — its promise would serialise as a
+ * result carrying no text, which a real client reports as an unexpected response type. The message loop
+ * owns those tools here. Every other message is handed straight to `handle`, and a handler is never invoked
+ * twice: the single call's result decides which way it is answered.
+ *
+ * @param {object} message - a parsed JSON-RPC request or notification.
+ * @returns {Promise<object|null>} a response, or null for notifications.
+ */
+export async function answer(message) {
+	const { id, method, params } = message ?? {};
+	if (method !== "tools/call") return handle(message);
+	const name = params?.name;
+	const selected = typeof name === "string" ? tool(name) : null;
+	const args = params?.arguments ?? {};
+	if (selected === null || args === null || typeof args !== "object" || Array.isArray(args)) return handle(message);
+	const reply = (result) => ({ jsonrpc: "2.0", id, result });
+	try {
+		const result = selected.handler(args);
+		return reply(toolResult(selected, isThenable(result) ? await result : result));
+	} catch (error) {
+		return reply(toolFailure(selected, error));
+	}
+}
+
 /**
  * Handle one JSON-RPC message.
  *
@@ -521,17 +573,14 @@ export function handle(message) {
 			if (args === null || typeof args !== "object" || Array.isArray(args)) return fail(RPC.invalidParams, "arguments must be an object");
 			try {
 				const result = selected.handler(args);
-				return reply({
-					content: [{ type: "text", text: result.text }],
-					...(result.structured === undefined ? {} : { structuredContent: result.structured }),
-					isError: false
-				});
+				// An asynchronous tool cannot be answered here. This function is synchronous, so its promise
+				// would be serialised as a result with no text at all — measured, against a real client, as
+				// `{"content":[{"type":"text"}],"isError":false}`, which the client rejects as an unexpected
+				// response type. The message loop answers those tools, through `answer()`.
+				if (isThenable(result)) return fail(RPC.internal, `tool ${selected.name} is asynchronous; it is answered by answer()`);
+				return reply(toolResult(selected, result));
 			} catch (error) {
-				// A tool-level failure is content the model can act on, not a broken
-				// transport: reporting it as a JSON-RPC error would hide the reason from
-				// the conversation.
-				const text = error instanceof ToolError ? error.message : `${selected.name} failed: ${String(error?.message ?? error)}`;
-				return reply({ content: [{ type: "text", text }], isError: true });
+				return reply(toolFailure(selected, error));
 			}
 		}
 		default:
@@ -560,7 +609,8 @@ export async function serve(streams = {}) {
 			output.write(`${JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: RPC.parse, message: `parse error: ${String(error?.message ?? error)}` } })}\n`);
 			continue;
 		}
-		const response = handle(message);
+		// `answer`, not `handle`: a waiting tool must be awaited, and awaiting a plain response is a no-op.
+		const response = await answer(message);
 		if (response !== null) output.write(`${JSON.stringify(response)}\n`);
 	}
 }

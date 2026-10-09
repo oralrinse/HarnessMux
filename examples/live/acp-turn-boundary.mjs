@@ -81,7 +81,11 @@ function arg(name, fallback) {
 /** This run's scratch directories and artifact paths. */
 function newLab() {
 	const id = Math.random().toString(36).slice(2, 8);
-	const base = join(tmpdir(), `hxlab-${id}`);
+	// `--lab <dir>` reuses an existing run's directory, which is what makes it possible to bring back the
+	// *same* executor session: the session's store is `<lab>/dshhome`, so a fresh directory could only ever
+	// produce a different session. Reusing it also keeps the same probe and receiver-trace files.
+	const reused = arg("lab", "");
+	const base = reused !== "" ? resolve(reused) : join(tmpdir(), `hxlab-${id}`);
 	const paths = {
 		id,
 		base,
@@ -593,42 +597,66 @@ async function main() {
 		// these sessions run with a real sandbox, and pointing one at the checkout made the host try to
 		// grant itself write access to it. `HARNESSMUX_CWD` overrides when a probe needs a real tree.
 		const sessionCwd = process.env.HARNESSMUX_CWD?.trim() || paths.base;
-		const session = await host.request("session/new", { cwd: sessionCwd, mcpServers: [] }, 90_000);
-		const sessionId = session?.sessionId;
-		if (typeof sessionId !== "string") throw new Error(`acp-turn-boundary: session/new returned ${JSON.stringify(session)}`);
+		// `--resume <sessionId>` adopts an existing persisted session instead of creating one. That is the
+		// only way to bring an executor back *as itself*: the delivery, the binding and the endpoint all name
+		// that session, and a new session would be a different target. The resume response carries config
+		// options but not the id, so the requested id is the one used.
+		const resumeId = arg("resume", "");
+		const resuming = resumeId !== "";
+		const session = resuming
+			? await host.request("session/resume", { sessionId: resumeId, cwd: sessionCwd, mcpServers: [] }, 120_000)
+			: await host.request("session/new", { cwd: sessionCwd, mcpServers: [] }, 90_000);
+		const sessionId = resuming ? resumeId : session?.sessionId;
+		if (typeof sessionId !== "string") throw new Error(`acp-turn-boundary: ${resuming ? "session/resume" : "session/new"} returned ${JSON.stringify(session)}`);
 		report.initialize = initialize;
 		report.sessionId = sessionId;
-		process.stdout.write(`acp-turn-boundary: session ${sessionId}\n`);
+		report.resumed = resuming;
+		process.stdout.write(`acp-turn-boundary: session ${sessionId}${resuming ? " (resumed)" : ""}\n`);
 
 		try {
-			// One ordinary prompt. `session/prompt` resolves when the turn it opened has ended, so its
-			// resolution is the host's own statement that the session is idle again — and the settle
-			// afterwards covers the measured lag before the turn's own events are in the session list.
-			const started = Date.now();
-			const stop = await host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt1 }] }, 300_000);
-			const ms = Date.now() - started;
-			await sleep(settleMs);
 			const entries = readProbe(paths);
-			const identity = entries.find((entry) => entry.kind === "session-identity" && entry.sid === sessionId) ?? null;
-			report.steps.push({
-				step: "prompt-1",
-				prompt: prompt1,
-				stopReason: stop?.stopReason ?? stop,
-				ms,
-				settleMs,
-				sessionHeader: identity?.header ?? null,
-				turnStarts: eventsOf(entries, sessionId, "log").filter((entry) => entry.type === "turn/start").map((entry) => entry.seq),
-				turnEnds: eventsOf(entries, sessionId, "log").filter((entry) => entry.type === "turn/end").map((entry) => ({ seq: entry.seq, reason: entry.data?.reason?.kind })),
-				eventTypes: [...new Set(eventsOf(entries, sessionId, "log").map((entry) => entry.type))],
-				// The three sources the receiver could read, compared seq by seq: on this host they agree.
-				sources: {
-					log: eventsOf(entries, sessionId, "log").map((entry) => entry.seq),
-					snapshot: eventsOf(entries, sessionId, "snapshot").map((entry) => entry.seq),
-					durable: eventsOf(entries, sessionId, "durable").map((entry) => entry.seq)
-				},
-				assistantTexts: digest(entries, sessionId, { sinceSeq: -1, sinceEventCount: 0 }).assistantTexts
-			});
-			process.stdout.write(`acp-turn-boundary: prompt-1 stop=${JSON.stringify(stop?.stopReason ?? stop)} events=${report.steps.at(-1).eventTypes.length} types\n`);
+			if (resuming) {
+				// No warm-up prompt: the session already exists, and sending it one would be a new turn in
+				// someone else's conversation rather than a restore.
+				report.steps.push({
+					step: "prompt-1",
+					skipped: true,
+					reason: "resumed session — no warm-up prompt is sent",
+					turnStarts: eventsOf(entries, sessionId, "log").filter((entry) => entry.type === "turn/start").map((entry) => entry.seq),
+					turnEnds: eventsOf(entries, sessionId, "log").filter((entry) => entry.type === "turn/end").map((entry) => ({ seq: entry.seq, reason: entry.data?.reason?.kind })),
+					eventTypes: [...new Set(eventsOf(entries, sessionId, "log").map((entry) => entry.type))]
+				});
+				process.stdout.write(`acp-turn-boundary: resumed without a prompt; session events so far=${report.steps.at(-1).eventTypes.length} types\n`);
+			} else {
+				// One ordinary prompt. `session/prompt` resolves when the turn it opened has ended, so its
+				// resolution is the host's own statement that the session is idle again — and the settle
+				// afterwards covers the measured lag before the turn's own events are in the session list.
+				const started = Date.now();
+				const stop = await host.request("session/prompt", { sessionId, prompt: [{ type: "text", text: prompt1 }] }, 300_000);
+				const ms = Date.now() - started;
+				await sleep(settleMs);
+				const entriesAfter = readProbe(paths);
+				const identity = entriesAfter.find((entry) => entry.kind === "session-identity" && entry.sid === sessionId) ?? null;
+				report.steps.push({
+					step: "prompt-1",
+					prompt: prompt1,
+					stopReason: stop?.stopReason ?? stop,
+					ms,
+					settleMs,
+					sessionHeader: identity?.header ?? null,
+					turnStarts: eventsOf(entriesAfter, sessionId, "log").filter((entry) => entry.type === "turn/start").map((entry) => entry.seq),
+					turnEnds: eventsOf(entriesAfter, sessionId, "log").filter((entry) => entry.type === "turn/end").map((entry) => ({ seq: entry.seq, reason: entry.data?.reason?.kind })),
+					eventTypes: [...new Set(eventsOf(entriesAfter, sessionId, "log").map((entry) => entry.type))],
+					// The three sources the receiver could read, compared seq by seq: on this host they agree.
+					sources: {
+						log: eventsOf(entriesAfter, sessionId, "log").map((entry) => entry.seq),
+						snapshot: eventsOf(entriesAfter, sessionId, "snapshot").map((entry) => entry.seq),
+						durable: eventsOf(entriesAfter, sessionId, "durable").map((entry) => entry.seq)
+					},
+					assistantTexts: digest(entriesAfter, sessionId, { sinceSeq: -1, sinceEventCount: 0 }).assistantTexts
+				});
+				process.stdout.write(`acp-turn-boundary: prompt-1 stop=${JSON.stringify(stop?.stopReason ?? stop)} events=${report.steps.at(-1).eventTypes.length} types\n`);
+			}
 
 			for (let round = 1; round <= rounds; round += 1) {
 				const before = readProbe(paths);
