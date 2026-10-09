@@ -96,6 +96,12 @@ function newLab() {
 		summary: join(base, "summary.json")
 	};
 	for (const dir of [base, paths.dshHome, paths.bridge]) mkdirSync(dir, { recursive: true });
+	// `--bridge` points the executor at an existing bridge — the shared one a real Codex session reads — and
+	// `--endpoint` gives it its own routing identity, so two receivers on one bridge never race for the same
+	// delivery. Both are opt-in; the default is the throwaway bridge above.
+	const externalBridge = arg("bridge", "");
+	if (externalBridge !== "") paths.bridge = resolve(externalBridge);
+	paths.endpointId = arg("endpoint", "dsh-endpoint");
 	for (const name of [".credentials.yaml", ".anonymous-user-id"]) {
 		const from = join(SOURCE_HOME, name);
 		if (existsSync(from)) copyFileSync(from, join(paths.dshHome, name));
@@ -169,7 +175,7 @@ function wireProfile(paths, profile, extraPatches, receiverRows = null) {
 			"        actor: dsh",
 			"        peer: codex",
 			"        protocolVersion: v2",
-			"        endpointId: dsh-endpoint",
+			`        endpointId: '${paths.endpointId}'`,
 			"        autoWake: true",
 			"        watchIntervalMs: 500",
 			`        debugLog: '${POSIX(paths.receiverLog)}'`
@@ -217,7 +223,7 @@ function crashReceiverRows(paths, sentinel, delayMs) {
 		"        actor: dsh",
 		"        peer: codex",
 		"        protocolVersion: v2",
-		"        endpointId: dsh-endpoint",
+		`        endpointId: '${paths.endpointId}'`,
 		"        autoWake: true",
 		"        watchIntervalMs: 500",
 		"        leaseMs: 4000",
@@ -434,8 +440,8 @@ function digest(entries, sid, { sinceSeq, sinceEventCount }) {
 /** Send, bind and deliver one delegated message. */
 function deliverDelegated(paths, sessionId, { topic, body, mode = "delegated" }) {
 	const sent = cli(paths, ["send", "--from", "codex", "--to", "dsh", "--topic", topic, "--kind", "instruction", "--body", body, "--no-deliver", "--no-route"]);
-	cli(paths, ["bind", sent.message.threadId, "--endpoint", "dsh-endpoint", "--session", sessionId, "--mode", mode]);
-	const delivered = cli(paths, ["deliver", sent.message.messageId, "--endpoint", "dsh-endpoint", "--session", sessionId, "--mode", mode]);
+	cli(paths, ["bind", sent.message.threadId, "--endpoint", paths.endpointId, "--session", sessionId, "--mode", mode]);
+	const delivered = cli(paths, ["deliver", sent.message.messageId, "--endpoint", paths.endpointId, "--session", sessionId, "--mode", mode]);
 	return { messageId: sent.message.messageId, threadId: sent.message.threadId, deliveryId: delivered.deliveryId };
 }
 
@@ -562,7 +568,7 @@ function describeExecution(record) {
 async function main() {
 	const mode = arg("mode", "smoke");
 	const profile = arg("profile", "acp");
-	const rounds = mode === "dispatch-recon" || mode === "dispatch-crash" ? 0 : Number(arg("rounds", "3"));
+	const rounds = mode === "dispatch-recon" || mode === "dispatch-crash" || mode === "serve" ? 0 : Number(arg("rounds", "3"));
 	const settleMs = Number(arg("settle", "8000"));
 	// `auto` exercises the automatic reply (P1b); `explicit` exercises an executor sending the result
 	// itself with `disposition=final`, which must suppress the automatic one (P1c).
@@ -994,6 +1000,41 @@ async function main() {
 					report.steps.push(step);
 					process.stdout.write(`acp-turn-boundary: contended ackedBeforeForeignTurnEnded=${step.ackedBeforeForeignTurnEnded} attemptsWhileBusy=${JSON.stringify(step.attemptWhileBusy)} ownTurn=${step.ownTurn} ${describeExecution(step.execution)}\n`);
 				}
+			}
+
+			if (mode === "serve") {
+				// Stay available as the Executor for Commander rounds — a delegated task from a real client,
+				// arriving whenever it arrives — and report each exchange as it lands. Nothing is dispatched
+				// from here: the client is the Commander, and this host only answers.
+				const serveMs = Number(arg("serveMs", "3600000"));
+				const deadline = Date.now() + serveMs;
+				const seenMessages = new Set();
+				const seenExecutions = new Set();
+				process.stdout.write(`acp-turn-boundary: serving as executor — endpoint=${paths.endpointId} session=${sessionId} bridge=${paths.bridge} for ${Math.round(serveMs / 1000)}s\n`);
+				while (Date.now() < deadline) {
+					await sleep(1_000);
+					try {
+						for (const message of messagesOf(paths)) {
+							if (message.from === "dsh" || seenMessages.has(message.messageId)) continue;
+							seenMessages.add(message.messageId);
+							process.stdout.write(`acp-turn-boundary: IN  [${message.messageId}] from=${message.from} thread=${message.threadId}\n  ${message.body.slice(0, 300).replace(/\n/gu, " ")}\n`);
+						}
+						for (const record of executions(paths)) {
+							if (seenExecutions.has(record.executionId)) continue;
+							seenExecutions.add(record.executionId);
+							process.stdout.write(`acp-turn-boundary: EXEC [${record.executionId}] delivery=${record.deliveryId} state=${record.state} key=${record.dispatchKey ?? "-"}\n`);
+						}
+						for (const message of automaticReplies(paths)) {
+							const key = `reply:${message.messageId}`;
+							if (seenMessages.has(key)) continue;
+							seenMessages.add(key);
+							process.stdout.write(`acp-turn-boundary: OUT [${message.messageId}] thread=${message.threadId} replyTo=${message.replyTo ?? "-"} ${message.body.length} chars\n`);
+						}
+					} catch (error) {
+						process.stdout.write(`acp-turn-boundary: serve poll error ${String(error?.message ?? error)}\n`);
+					}
+				}
+				report.steps.push({ step: "serve", endpointId: paths.endpointId, sessionId, servedMs: serveMs });
 			}
 
 			report.executions = executions(paths).map((record) => ({
