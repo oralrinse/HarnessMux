@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as core from "../packages/core/core-v2.mjs";
+import * as execution from "../packages/core/execution.mjs";
 
 const HERE = new URL(".", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, "$1");
 const PLUGIN = pathToFileURL(join(HERE, "..", "packages", "receiver-dsh", "index.js")).href;
@@ -251,6 +252,96 @@ function seedDelivery(root, input) {
 		assert.equal(state.state, "acked", "the delivery is acked");
 		assert.equal(state.note, "steered", "recording the steering hand-off");
 		assert.equal(core.getDispatch(root, delivery.deliveryId)?.disposition, "steered", "and the correlation says the same");
+	} finally {
+		mock.dispose();
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 4b. running, but the open turn belongs to somebody else  ->  NOT steered ----
+// Measured on a real host (ACP profile, isolated home) while a long unrelated turn was open: a
+// delegated delivery on a delegated binding took the *steer* path, was acked with note `steered`,
+// opened no turn of its own, and the execution record ended up holding that other turn's final
+// assistant message as the delegated answer — 1945 characters of somebody else's work. The frozen
+// rule is WAIT_FOR_IDLE, and it has to apply to the steer path too, because that is the path a
+// running session takes.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-foreign-"));
+	const sessionId = "session-csc-foreign";
+	core.ensureBridge(root, { remember: false });
+	core.registerEndpoint(root, { actor: "dsh", endpointId: "dsh-endpoint", transport: "in-process", sessions: [sessionId], remember: false });
+	const { delivery } = seedDelivery(root, { sessionId, mode: "delegated", bindingMode: "delegated", body: "CSC_FOREIGN_MARKER" });
+
+	const steered = [];
+	const running = {
+		status: "running",
+		steer: (message) => steered.push(message),
+		session: {
+			header: { id: sessionId },
+			// A turn that was already open before any dispatch: somebody else's work.
+			log: [
+				{ type: "turn/start", seq: 5, data: { turn: 1 } },
+				{ type: "step/start", seq: 6, data: { turn: 1, step: 1 } }
+			]
+		}
+	};
+	const mock = mockContext(running);
+	plugin.apply(mock.ctx, { bridgeRoot: root, protocolVersion: "v2", endpointId: "dsh-endpoint", watchIntervalMs: 300, debugLog: join(root, "trace.log") });
+	try {
+		// Several ticks: the deferral has to hold for as long as the foreign turn lasts, not just once.
+		await new Promise((resolve) => setTimeout(resolve, 3_500));
+		assert.equal(steered.length, 0, "a turn this delivery does not own is never steered into");
+		assert.equal(mock.followups.length, 0, "and no second turn is opened into the same session either");
+		const state = core.getDelivery(root, delivery.deliveryId);
+		assert.equal(state.state, "queued", "the delivery waits for the session to become free");
+		assert.equal(state.attempt, 0, "unclaimed, so `attempt` keeps meaning that an attempt happened");
+		assert.equal(state.ackedAt, undefined, "and nothing is acked, because the host accepted nothing");
+		assert.equal(core.listDispatches(root).length, 0, "no dispatch is recorded for work that was never handed over");
+	} finally {
+		mock.dispose();
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
+	}
+}
+
+// --- 4c. a turn/end for a turn the execution never opened  ->  not its answer ---
+// The log watcher bounds its reading at the dispatch baseline, so a turn that was already open when
+// the delivery was dispatched still reports a *fresh* `turn/end`. Completing on it wrote
+// `state: completed` with `turns: []` and stored the other work's final message as this delivery's
+// answer. Failing closed is what makes the ownership rule impossible to bypass by any other path.
+{
+	const root = mkdtempSync(join(tmpdir(), "hxmux-csc-unrecorded-"));
+	const sessionId = "session-csc-unrecorded";
+	core.ensureBridge(root, { remember: false });
+	core.registerEndpoint(root, { actor: "dsh", endpointId: "dsh-endpoint", transport: "in-process", sessions: [sessionId], remember: false });
+	// The baseline sits *after* the foreign turn opened, which is exactly how the live host looked.
+	const record = execution.beginExecution(root, {
+		deliveryId: "D-unrecorded",
+		threadId: "T-unrecorded",
+		sessionId,
+		dispatchKind: "steer",
+		baselineLogSeq: 6
+	});
+	const log = [
+		{ type: "turn/start", seq: 5, data: { turn: 1 } },
+		{ type: "step/start", seq: 6, data: { turn: 1, step: 1 } },
+		{
+			type: "assistant/message",
+			seq: 8,
+			data: { turn: 1, step: 1, message: { role: "assistant", content: [{ type: "text", text: "somebody else's answer" }] } }
+		},
+		{ type: "step/end", seq: 9, data: { turn: 1, step: 1 } },
+		{ type: "turn/end", seq: 10, data: { turn: 1, reason: { kind: "completed" } } }
+	];
+	const agent = { status: "running", steer: () => {}, session: { header: { id: sessionId }, log } };
+	const mock = mockContext(agent);
+	plugin.apply(mock.ctx, { bridgeRoot: root, protocolVersion: "v2", endpointId: "dsh-endpoint", watchIntervalMs: 300, debugLog: join(root, "trace.log") });
+	try {
+		await new Promise((resolve) => setTimeout(resolve, 1_500));
+		const after = execution.getExecution(root, record.executionId);
+		assert.equal(after.state, "dispatching", "an execution is not completed by a turn it never opened");
+		assert.deepEqual(after.turns, [], "and it records no turn it did not open");
+		assert.equal(after.finalText, "", "so another turn's answer is never stored as its own");
+		assert.equal(after.finalAssistantMessageSeq, null, "and no sequence is claimed for it either");
 	} finally {
 		mock.dispose();
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });

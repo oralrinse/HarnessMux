@@ -1059,6 +1059,45 @@ export function apply(ctx, config = {}) {
 				);
 				continue;
 			}
+			// Whether this delivery is a Commander round at all: delegated, on an explicitly delegated
+			// binding. Read from the queued delivery rather than from the claim, because the ownership
+			// gate below has to run before anything is claimed — the claim is what the gate is there to
+			// withhold. It is the same data: `claimDelivery` copies the queue entry.
+			const queuedBinding = executionV2 === null || !delivery.threadId ? null : mailboxV2.getBinding(root, delivery.threadId);
+			const claimableAuthorized = delivery.mode === "delegated" && queuedBinding !== null && queuedBinding.mode === "delegated";
+			// The ownership gate. It is applied **here**, before the delivery is claimed and before
+			// either hand-off is chosen, because the rule is about the turn rather than about which
+			// call opens it.
+			//
+			// A delegated Commander round must answer with its *own* result. Two ways to get that
+			// wrong were both live behaviours of this receiver: steering the delivery into a turn
+			// somebody else started, and waking an idle session. Only the second was gated, and the
+			// first is the one that mixes work — measured on a real host, a delegated delivery handed
+			// over while another turn was open was `acked` with note `steered`, opened no turn of its
+			// own, and left the execution record holding that foreign turn's final assistant message as
+			// the delegated answer. The reply would then have claimed work it did not do.
+			//
+			// Doing it before the claim is also what keeps `attempt` honest: `attempt` is incremented by
+			// `claimDelivery` and nowhere else, so claiming in order to hand the delivery straight back
+			// would turn "a delivery attempt happened" into "a poll happened" for every tick of somebody
+			// else's long turn.
+			//
+			// The one exception is a turn this execution demonstrably opened, which is its own
+			// continuation. Advisory traffic and unbound work are untouched: only a delegated delivery on
+			// an explicitly delegated binding is a Commander round, and only a Commander round is gated.
+			if (claimableAuthorized) {
+				const foreign = unownedOpenTurn(sessionId);
+				if (foreign !== null) {
+					// Deferred, not failed and not acked, and deliberately left queued rather than
+					// claimed: the host has not accepted anything, so nothing has happened yet.
+					diagnoseOnChange(
+						`waiting-idle:${sessionId}`,
+						`${foreign.turn}`,
+						`pump: defer ${delivery.deliveryId} — ${sessionId} is running turn ${foreign.turn} (start#${foreign.turnStartSeq}) which this execution does not own; not steering, not claiming`
+					);
+					continue;
+				}
+			}
 			// The backoff deadline shrinks every tick, so the remaining time is bucketed
 			// to whole seconds: one line per second of waiting, not ten.
 			const notBefore = retryAfter.get(backoffKey(delivery.deliveryId)) ?? 0;
@@ -1172,6 +1211,23 @@ export function apply(ctx, config = {}) {
 	}
 
 	/**
+	 * The open turn of a session that a delegated round cannot claim, if there is one.
+	 *
+	 * This is the ownership rule expressed once, so that both hand-offs obey the same decision: a
+	 * delegated round may only proceed when the session is free, or when the turn it would join was
+	 * opened by the execution that is already outstanding for that session.
+	 *
+	 * @param {string|undefined} sessionId - the session the delivery is addressed to.
+	 * @returns {{turn: number|null, turnStartSeq: number|null}|null} the foreign turn, or null.
+	 */
+	function unownedOpenTurn(sessionId) {
+		if (executionV2 === null || typeof sessionId !== "string" || sessionId === "") return null;
+		const ownership = sessionTurnState(sessionId);
+		if (!ownership.open) return null;
+		return executionV2.ownsOpenTurn(executionV2.outstandingExecution(root, sessionId), ownership) ? null : ownership;
+	}
+
+	/**
 	 * Open a turn in an idle session and hand it one delivery.
 	 *
 	 * This is the operation the whole stage exists for. The host is asked to resume the *existing*
@@ -1198,30 +1254,9 @@ export function apply(ctx, config = {}) {
 			diagnose(`pump: cannot wake for ${delivery.deliveryId}: no session id`);
 			return;
 		}
-		// Turn ownership is a precondition, and it is a scheduling rule of the Commander workflow rather than a
-		// change to delivery semantics.
-		//
-		// A delegated task must answer with its *own* result. Steering it into a turn somebody else started
-		// would make the final assistant message a mixture of that work and this delivery — measurable, but
-		// not attributable — so the reply could not honestly claim to be this execution's answer. Waiting for
-		// idle costs a moment and buys a clean turn.
-		//
-		// The one exception is a turn this execution demonstrably opened, which is its own continuation.
-		const ownership = sessionTurnState(targetSessionId);
-		if (ownership.open && !executionV2.ownsOpenTurn(executionV2.outstandingExecution(root, targetSessionId), ownership)) {
-			// Deferred, not failed and not acked: the host has not accepted anything yet, so acking here would
-			// claim an acceptance that never happened. The delivery returns to the queue and is re-claimed
-			// once the session is free.
-			mailboxV2.releaseDelivery(root, delivery.deliveryId, { reason: "waiting-for-idle" });
-			retryAfter.set(backoffKey(delivery.deliveryId), Date.now() + RETRY_BASE_MS);
-			diagnoseOnChange(
-				`waiting-idle:${targetSessionId}`,
-				`${ownership.turn}`,
-				`pump: defer ${delivery.deliveryId} — ${targetSessionId} is running turn ${ownership.turn} (start#${ownership.turnStartSeq}) which this execution does not own; not steering`
-			);
-			return;
-		}
-
+		// Turn ownership was decided by `pumpV2` before the claim, for both hand-offs at once, so it is
+		// not re-decided here: by the time this runs the session is either free or running a turn this
+		// execution demonstrably opened.
 		const text = deliveryText(delivery, claim, message);
 		// Same ordering rule as the steer path: the correlation is durable before the host is touched, so
 		// a crash cannot leave a completed turn that nothing points back to.
@@ -1529,6 +1564,23 @@ export function apply(ctx, config = {}) {
 					}
 					if (entry?.type !== "turn/end" || !Number.isInteger(entry?.data?.turn)) continue;
 					const turn = entry.data.turn;
+					// Only a turn this execution actually recorded opening can be its answer. Measured on a
+					// real host: a delivery handed over while another turn was already open never opened a
+					// turn of its own, and the watcher — which bounds its reading at the dispatch baseline —
+					// saw that turn's `turn/end` as fresh anyway. Completing on it wrote `state: completed`
+					// with `turns: []` and stored the *other* work's final assistant message as this
+					// delivery's answer, which is precisely the dishonest attribution the ownership rule
+					// exists to prevent. Failing closed here means a mixed turn can never be reported as
+					// this execution's result, whatever path put the work there.
+					const recorded = (Array.isArray(record.turns) ? record.turns : []).some((followed) => followed.turn === turn);
+					if (!recorded) {
+						diagnoseOnChange(
+							`unrecorded-turn-end:${record.executionId}`,
+							String(turn),
+							`log: execution ${record.executionId} saw turn ${turn} end#${entry.seq} but never recorded it opening; not completing the execution on a turn that is not its own`
+						);
+						continue;
+					}
 					const reasonKind = String(entry?.data?.reason?.kind ?? "unknown");
 					const ended = executionV2.endTurn(root, record.executionId, { turn, reason: entry?.data?.reason, turnEndSeq: entry.seq });
 					diagnose(`log: execution ${record.executionId} turn ${turn} end#${entry.seq} reason=${reasonKind} state=${ended?.state ?? "?"}`);

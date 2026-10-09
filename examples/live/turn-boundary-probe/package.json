@@ -1,0 +1,10 @@
+{
+  "name": "@harnessmux/turn-boundary-probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only instrument used by the ACP turn-boundary live probe. Mounted into an isolated profile; never shipped.",
+  "exports": {
+    ".": "./index.js"
+  }
+}

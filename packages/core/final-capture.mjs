@@ -167,14 +167,26 @@ export function completionOf(record) {
 }
 
 /**
- * Collect the visible text of one event, wherever it is nested.
+ * Collect the visible text of one event, wherever it is nested inside its message.
  *
  * Measured shape: `event.data.message.content[]` holds blocks, and the visible ones are
  * `{ type: "text", text }` — often beside a `{ type: "reasoning" }` block whose text is empty. A
  * reasoning block is never user-visible, so only `type === "text"` is collected, in content order.
  *
+ * The walk is bounded to the event's **message**, and that boundary is load-bearing rather than
+ * tidiness. A real `assistant/message` from a live host also embeds the provider stream that produced
+ * it, in `event.data.stream[]`, and that stream contains a `block-end` chunk carrying a *copy* of the
+ * very same text:
+ *
+ *   data.message.content = [{ type: "reasoning", … }, { type: "text", text: "ROUND_1_DONE" }]
+ *   data.stream[5].chunk = { type: "block-end", index: 1, block: { type: "text", text: "ROUND_1_DONE" } }
+ *
+ * Walking the whole event therefore collects the answer twice. Measured on a live host: the execution
+ * record read `"ROUND_1_DONEROUND_1_DONE"` where the message said `"ROUND_1_DONE"` once. The message is
+ * the content authority; the stream is transport, and a copy is not a second source.
+ *
  * @param {object} event - a session event.
- * @returns {string} the joined visible text, or an empty string.
+ * @returns {string} the joined visible text of its message, or an empty string.
  */
 export function visibleTextOf(event) {
 	const parts = [];
@@ -187,7 +199,7 @@ export function visibleTextOf(event) {
 		if (value.type === "text" && typeof value.text === "string") parts.push(value.text);
 		for (const nested of Object.values(value)) walk(nested);
 	};
-	walk(event);
+	walk(event?.data?.message);
 	return parts.join("");
 }
 

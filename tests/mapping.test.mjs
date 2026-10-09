@@ -628,23 +628,77 @@ withRoot((root) => {
 			seq: 34,
 			data: { turn: 1, step: 3, message: { role: "assistant", content: [{ type: "reasoning", text: "" }, { type: "text", text: "the answer" }] } }
 		};
-		const texts = [];
-		const walk = (v) => {
-			if (v === null || typeof v !== "object") return;
-			if (Array.isArray(v)) {
-				for (const item of v) walk(item);
-				return;
-			}
-			if (v.type === "text" && typeof v.text === "string") texts.push(v.text);
-			for (const value of Object.values(v)) walk(value);
+		// The shipped reader is called, not copied. M21 used to re-implement the walk inline, which is
+		// how a real doubling defect survived it: a test that owns its own copy of the algorithm cannot
+		// fail when the algorithm changes. M24 is the case that copy was blind to.
+		assert.equal(capture.visibleTextOf(event), "the answer", "the visible text is reachable from the event without knowing the nesting");
+		const nested = {
+			type: "assistant/message",
+			seq: 35,
+			data: { turn: 1, message: { role: "assistant", content: [{ type: "text", text: "a" }, { type: "tool-call" }, { type: "text", text: "b" }] } }
 		};
-		walk(event);
-		assert.deepEqual(texts, ["the answer"], "the visible text is reachable from the event without knowing the nesting");
+		assert.equal(capture.visibleTextOf(nested), "ab", "several visible blocks are joined in content order");
 		assert.equal(event.type, "assistant/message", "and the event names itself");
 		assert.equal(Number.isInteger(event.seq), true, "with a sequence to correlate against");
 	} finally {
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 });
 	}
+}
+
+// --- M24. a real assistant/message embeds its own stream copy of the text ------
+// Measured on a live host, ACP profile, three delegated deliveries in a row. A captured
+// `assistant/message` carries BOTH the finished message and the raw provider stream that produced it,
+// and the stream repeats the text in a `block-end` chunk:
+//
+//   data.message.content[1]       = { type: "text", text: "ROUND_1_DONE" }
+//   data.stream[5].chunk.block    = { type: "text", text: "ROUND_1_DONE" }
+//
+// Walking the whole event collected both, so the execution record stored
+// `"ROUND_1_DONEROUND_1_DONE"` as the delegated answer — measured, in all three rounds. The message is
+// the content authority; the stream is transport, and a copy of the answer is not a second answer.
+{
+	// The real shape, reduced to the fields that matter.
+	const event = {
+		type: "assistant/message",
+		seq: 27,
+		data: {
+			turn: 2,
+			step: 1,
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "reasoning", text: "the mailbox message instructs: reply with exactly ROUND_1_DONE" },
+					{ type: "text", text: "ROUND_1_DONE" }
+				],
+				source: { kind: "model", provider: "deepseek-official", model: "deepseek-v4-flash" }
+			},
+			usage: { inputTokens: 301, outputTokens: 310 },
+			stream: [
+				{ type: "chunk", chunk: { type: "block-start", index: 1, blockType: "text" } },
+				{ type: "chunk", chunk: { type: "text-chunks", index: 1, texts: ["RO", "UND", "_1", "_DONE"] } },
+				{ type: "chunk", chunk: { type: "block-end", index: 1, block: { type: "text", text: "ROUND_1_DONE" } } },
+				{ type: "chunk", chunk: { type: "finish", reason: { kind: "stop" } } }
+			]
+		}
+	};
+	assert.equal(capture.visibleTextOf(event), "ROUND_1_DONE", "the text is read from the message and counted once, not once per copy");
+	assert.equal(capture.finalAnswerOf([event], 2).text, "ROUND_1_DONE", "so the recorded final answer is the answer itself");
+	assert.equal(capture.finalAssistantEvent([event], 2).seq, 27, "and the event it came from is still identified");
+
+	// The other half of the same rule: the stream must not be able to *invent* an answer either. A
+	// message with no visible text has none, however much text its transport happened to carry.
+	const answerless = {
+		type: "assistant/message",
+		seq: 18,
+		data: {
+			turn: 2,
+			step: 1,
+			message: { role: "assistant", content: [{ type: "reasoning", text: "thinking before calling a tool" }] },
+			stream: [{ type: "chunk", chunk: { type: "block-end", index: 1, block: { type: "text", text: "not user-visible" } } }]
+		}
+	};
+	assert.equal(capture.visibleTextOf(answerless), "", "a transport copy is not a message the user was shown");
+	assert.equal(capture.finalAnswerOf([answerless], 2), null, "so a turn whose message carries no text has no answer");
 }
 
 // --- M22. Commander delegated execution requires turn ownership ---------------
@@ -691,17 +745,33 @@ withRoot((root) => {
 }
 
 // --- M23. the receiver defers rather than steering into a foreign turn --------
+// The rule is decided once, before the claim and before either hand-off is chosen. It has to be there
+// rather than inside the wake path: measured on a real host, a delegated delivery handed over while
+// another turn was open took the *steer* path, was acked with note `steered`, opened no turn of its
+// own, and left the execution holding the other turn's final message as its answer.
 {
 	const source = readFileSync(join(HERE, "..", "packages", "receiver-dsh", "index.js"), "utf8");
-	assert.match(source, /ownsOpenTurn/u, "the wake path consults turn ownership");
-	assert.match(source, /waiting-for-idle/u, "and defers the delivery when the turn is not its own");
-	// Deferral must not ack: the host accepted nothing, so claiming acceptance would be false.
-	const deferBlock = source.slice(source.indexOf("const ownership = sessionTurnState"), source.indexOf("const text = deliveryText"));
-	assert.match(deferBlock, /releaseDelivery/u, "deferral releases the delivery back to the queue");
-	assert.equal(/ackDelivery/u.test(deferBlock), false, "and never acks it, because the host accepted nothing");
+	assert.match(source, /ownsOpenTurn/u, "the pump consults turn ownership");
+	// The gate is the block between the ownership helper call and the backoff check: it runs after the
+	// delivery has been proved eligible and before anything is claimed or handed over.
+	const gateStart = source.indexOf("const foreign = unownedOpenTurn(sessionId)");
+	assert.notEqual(gateStart, -1, "the pump computes the foreign open turn");
+	const gateEnd = source.indexOf("const notBefore = retryAfter.get");
+	assert.notEqual(gateEnd, -1, "and the gate precedes the backoff check");
+	assert.equal(gateStart < gateEnd, true, "the gate is written before the claim path");
+	const gate = source.slice(gateStart, gateEnd);
+	assert.match(gate, /continue;/u, "a foreign open turn defers this delivery");
+	assert.equal(/ackDelivery/u.test(gate), false, "and never acks it, because the host accepted nothing");
+	assert.equal(/claimDelivery/u.test(gate), false, "and never claims it, so `attempt` keeps meaning a real attempt happened");
+	assert.match(gate, /not steering, not claiming/u, "the deferral says what it refused to do");
 	// Turn state is read from the durable log. Both sources were measured to carry the same events, including
 	// `turn/start` and `turn/end`, so this is a choice of authority rather than a workaround.
 	assert.match(source, /Array\.isArray\(session\.log\) \? session\.log : \[\]/u, "turn state is read from the session log");
+	// A turn this execution never recorded opening can never be its answer, whatever path put the work
+	// there: the watcher bounds its reading at the dispatch baseline, so a turn that was already open at
+	// dispatch still shows a fresh `turn/end`.
+	assert.match(source, /unrecorded-turn-end/u, "a turn/end for a turn the execution never opened is refused");
+	assert.match(source, /never recorded it opening/u, "and says so in the trace rather than completing quietly");
 }
 
 console.log("mapping.test.mjs: all assertions passed");
