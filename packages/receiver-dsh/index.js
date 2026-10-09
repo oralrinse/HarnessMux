@@ -1394,6 +1394,21 @@ export function apply(ctx, config = {}) {
 	 *              loaded, an unreadable store, or a record that has not been flushed all look the same
 	 *              from here, and guessing "it never happened" is exactly how a task runs twice.
 	 *
+	 * `absent` is therefore not "I did not find it" — it is a claim about the host's own durable state, and
+	 * it may only be made when **all** of these hold:
+	 *
+	 *   1. a record for that exact session was read, not an empty or default one;
+	 *   2. the read is complete — this is the session's own event list, not a window, and it reaches at
+	 *      least the sequence the dispatch was made from (`baselineLogSeq`);
+	 *   3. the read is at least as new as the dispatch attempt: one watch interval has passed since the
+	 *      host was called, so a record that cannot yet contain the dispatch is not read as proof;
+	 *   4. the record is authoritative for that session — the live session object in this process, or the
+	 *      durable store through `sessionQuery.observeSession`.
+	 *
+	 * Anything else is `unknown`, and `unknown` waits. The guarantee this stage provides is exactly as wide
+	 * as those four conditions: a session that is never restored, or a store that never becomes readable,
+	 * parks the delivery rather than duplicating the work — safe, and visible in the trace.
+	 *
 	 * The read is the session's own event list, live when this process holds the session and from the
 	 * durable store (`sessionQuery.observeSession`) when it does not — measured on a live host, both carry
 	 * the keyed `agent/inbox/spliced` and `user/message`.

@@ -134,14 +134,26 @@ withRoot((root) => {
 }
 
 // --- 7. both client-facing skills carry the Commander rule ---------------------
+// The Codex copy is not a third file here: the adapter deliberately keeps none, and the installer copies
+// the one shared skill to `$CODEX_HOME/skills/harnessmux/SKILL.md`. What this pins is that the *sources*
+// a client can be given never disagree — a rule that drifts between clients holds for only one of them.
 {
-	for (const relative of ["packages/portable-plugin/skills/harnessmux/SKILL.md", "packages/adapter-claude/skills/harnessmux/SKILL.md"]) {
+	const copies = [
+		"packages/portable-plugin/skills/harnessmux/SKILL.md",
+		"packages/adapter-claude/skills/harnessmux/SKILL.md"
+	];
+	for (const relative of copies) {
 		const skill = readFileSync(join(HERE, "..", relative), "utf8");
 		assert.match(skill, /Sending work to DeepSeek Harness is not completion/u, `${relative} states the core rule`);
 		assert.match(skill, /client_request_id/u, `${relative} explains the send-once key`);
 		assert.match(skill, /Never resend because a wait timed out/u, `${relative} forbids the resend that caused a duplicate task`);
 		assert.match(skill, /wait_for_reply/u, `${relative} tells the commander how to stay`);
 	}
+	assert.equal(
+		readFileSync(join(HERE, "..", copies[1]), "utf8"),
+		readFileSync(join(HERE, "..", copies[0]), "utf8"),
+		"the two shipped copies are byte-identical, so the rule cannot drift between clients"
+	);
 }
 
 // --- 8. the executor skill exists and names the review contract ---------------
